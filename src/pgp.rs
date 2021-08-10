@@ -1,7 +1,7 @@
 use std::io;
+use std::io::Read;
 use std::io::Write;
 use std::fmt;
-use std::fmt::Write as _;
 use std::fs::File;
 use std::time::Duration;
 use std::time::SystemTime;
@@ -153,11 +153,11 @@ pub fn generate(cfg: GenerateConfig<'_>) -> GeneralResult<()> {
  * basic
  */
 
-pub fn load<P: AsRef<Path>>(path: P) -> GeneralResult<Cert> {
+pub fn load_cert<P: AsRef<Path>>(path: P) -> GeneralResult<Cert> {
     Cert::from_file(path)
 }
 
-pub fn load_all<P: AsRef<Path>>(path: P) -> GeneralResult<Vec<Cert>> {
+pub fn load_keyring<P: AsRef<Path>>(path: P) -> GeneralResult<Vec<Cert>> {
     let mut certs = vec![];
 
     for maybe_cert in CertParser::from_file(path)? {
@@ -167,7 +167,31 @@ pub fn load_all<P: AsRef<Path>>(path: P) -> GeneralResult<Vec<Cert>> {
     Ok(certs)
 }
 
-fn get_signing_keys(certs: &[Cert], p: &dyn Policy, timestamp: Option<SystemTime>, key_id: Option<KeyID>) -> GeneralResult<Vec<KeyPair>> {
+pub fn load_cert_from_keyring<P: AsRef<Path>>(path: P, fingerprint: &Option<Fingerprint>) -> GeneralResult<Option<Cert>> {
+    
+    let mut parser = CertParser::from_file(path)?;
+    if let Some(fingerprint) = fingerprint {
+        for maybe_cert in parser {
+            let cert = maybe_cert?;
+            if cert.fingerprint() == *fingerprint {
+                return Ok(Some(cert));
+            }
+        }
+    } else {
+        if let Some(maybe_cert) = parser.next() {
+            let cert = maybe_cert?;
+            if let Some(maybe_cert) = parser.next() {
+                let _ = maybe_cert?;
+                return Ok(None)
+            }
+            return Ok(Some(cert))
+        }
+    }
+    
+    Ok(None)
+}
+
+fn get_signing_keys<'a, I: IntoIterator<Item = &'a Cert>>(certs: I, p: &dyn Policy, timestamp: Option<SystemTime>, key_id: Option<KeyID>) -> GeneralResult<Vec<KeyPair>> {
     
     let mut keys = Vec::new();
     
@@ -213,11 +237,9 @@ fn get_signing_keys(certs: &[Cert], p: &dyn Policy, timestamp: Option<SystemTime
     Ok(keys)
 }
 
-pub trait PasswordProvider {
-    fn provide(&self, cert: Fingerprint, key: Fingerprint) -> io::Result<String>;
-}
 
-pub fn get_signing_key(cert: &Cert, p: &dyn Policy, timestamp: Option<SystemTime>, key_id: KeyID, password: &dyn PasswordProvider) -> GeneralResult<KeyPair> {
+
+pub fn check_key(cert: &Cert, p: &dyn Policy, timestamp: Option<SystemTime>, key_id: &KeyID) -> GeneralResult<bool> {
     for key in cert.keys()
             .with_policy(p, timestamp)
             .alive()
@@ -225,7 +247,29 @@ pub fn get_signing_key(cert: &Cert, p: &dyn Policy, timestamp: Option<SystemTime
             .for_signing()
             .supported()
             .map(|ka| ka.key())
-            .filter(|key| key.keyid() == key_id)
+            .filter(|key| key.keyid() == *key_id)
+    {
+        return Ok(true);
+    }
+
+    Ok(false)
+}
+
+
+
+pub trait PasswordProvider {
+    fn provide(&self, cert: Fingerprint, key: Fingerprint) -> io::Result<String>;
+}
+
+pub fn get_signing_key(cert: &Cert, p: &dyn Policy, timestamp: Option<SystemTime>, key_id: &KeyID, password: &dyn PasswordProvider) -> GeneralResult<KeyPair> {
+    for key in cert.keys()
+            .with_policy(p, timestamp)
+            .alive()
+            .revoked(false)
+            .for_signing()
+            .supported()
+            .map(|ka| ka.key())
+            .filter(|key| key.keyid() == *key_id)
     {
         // TODO: change logic process
         if let Some(secret) = key.optional_secret() {
@@ -255,29 +299,6 @@ pub fn build_signer<'a, W: 'a + io::Write + Sync + Send>(w: W, mut keypairs: Vec
     }
 
     let mut builder = SignatureBuilder::new(SignatureType::Text);
-
-    let message = Message::new(w);
-    let mut signer = Signer::with_template(message, keypairs.pop().unwrap(), builder).cleartext();
-
-    for s in keypairs {
-        signer = signer.add_signer(s);
-    }
-    let mut message = signer.build()?;
-
-    Ok(message)
-}
-
-fn sign_data<R, W>(input: &mut R, output: &mut W, mut keypairs: Vec<KeyPair>) -> GeneralResult<()>
-where
-    R: io::Read + Sync + Send,
-    W: io::Write + Sync + Send
-{
-    if keypairs.is_empty() {
-        return Err(anyhow::anyhow!("No signing keys found"));
-    }
-
-    // Prepare a signature template.
-    let mut builder = SignatureBuilder::new(SignatureType::Text);
     // for (critical, n) in notations.iter() {
     //     builder = builder.add_notation(
     //         n.name(),
@@ -287,44 +308,66 @@ where
     //     )?;
     // }
 
-    let message = Message::new(output);
+    let message = Message::new(w);
     let mut signer = Signer::with_template(message, keypairs.pop().unwrap(), builder).cleartext();
-    // if let Some(time) = time {
-    //     signer = signer.creation_time(time);
-    // }
+
     for s in keypairs {
         signer = signer.add_signer(s);
     }
-    let mut message = signer.build()?;
+    let message = signer.build()?;
 
-    // Finally, copy stdin to our writer stack to sign the data.
-    io::copy(input, &mut message)?;
+    Ok(message)
+}
 
-    message.finalize()?;
 
+pub fn export_publickey<W: Write + Sync + Send>(cert: &Cert, w: &mut W) -> GeneralResult<()> {
+    let mut w = Writer::new(w, Kind::PublicKey)?;
+    cert.serialize(&mut w)?;
+    w.finalize()?;
     Ok(())
 }
 
+pub fn export_publickey_raw<W: Write + Sync + Send>(cert: &Cert, w: &mut W) -> GeneralResult<()> {
+    cert.serialize(w)
+}
 
 
-pub struct CertInfo<'a> {
-    cert: &'a Cert,
+// pub fn verify() -> GeneralResult<bool> {
+
+// }
+
+
+
+pub fn read_cert_from_console() -> GeneralResult<Cert> {
+    let mut buf = Vec::new();
+    let len = io::stdin().read_to_end(&mut buf)?;
+    Cert::from_reader(buf.as_slice())
+}
+
+/**
+ * 
+ */
+
+pub struct CertsInfo<'a> {
+    certs: &'a [Cert],
     key_id: Option<&'a KeyID>,
+    fingerprint: Option<&'a Fingerprint>,
     p: &'a dyn Policy
 }
 
-impl<'a> CertInfo<'a> {
+impl<'a> CertsInfo<'a> {
 
-    pub fn new(cert: &'a Cert, key_id: Option<&'a KeyID>, p: &'a dyn Policy) -> Self {
-        CertInfo {
-            cert,
+    pub fn new(certs: &'a [Cert], key_id: Option<&'a KeyID>, fingerprint: Option<&'a Fingerprint>, p: &'a dyn Policy) -> Self {
+        CertsInfo {
+            certs,
             key_id,
+            fingerprint,
             p
         }
     }
 }
 
-impl<'a> fmt::Display for CertInfo<'a> {
+impl<'a> fmt::Display for CertsInfo<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         use sequoia_openpgp::cert::prelude::*;
 
@@ -359,35 +402,51 @@ impl<'a> fmt::Display for CertInfo<'a> {
         }
 
 
-        f.write_fmt(format_args!("{}\n", self.cert))?;
-        for ka in self.cert.keys().with_policy(self.p, None).supported() {
-            let ka: ValidErasedKeyAmalgamation<_> = ka;
-            let key = ka.key();
-            if let Some(key_id) = self.key_id {
-                if *key_id == key.keyid() {
-                    f.write_str("->")?;
+        for cert in self.certs {
+
+            let mut mark = '*';
+            if let Some(fingerprint) = self.fingerprint {
+                if *fingerprint == cert.fingerprint() {
+                    mark = '^';
                 }
             }
-            f.write_fmt(format_args!(
-                "\t{}/{} {}\n\t create: {}, expires: {}\n", 
-                key.pk_algo(),
-                key.keyid(),
-                key.fingerprint(),
-                SystemTimeDisplay::Some(key.creation_time()),
-                SystemTimeDisplay::from(ka.key_expiration_time())
-            ))?;
-            if ka.primary() {
-                f.write_str("\t\t")?;
-                let mut first = true;
-                for ua in self.cert.userids() {
-                    if first {
-                        first = false;
-                    } else {
-                        f.write_str(", ")?;
+
+            if cert.is_tsk() {
+                f.write_fmt(format_args!("{} {} [Transferable Secret Key]\n", mark, cert.fingerprint()))?;
+            } else {
+                f.write_fmt(format_args!("{} {} [OpenPGP Certificate]\n", mark, cert.fingerprint()))?;
+            }
+        
+            
+            for ka in cert.keys().with_policy(self.p, None).supported() {
+                let ka: ValidErasedKeyAmalgamation<_> = ka;
+                let key = ka.key();
+                if let Some(key_id) = self.key_id {
+                    if *key_id == key.keyid() {
+                        f.write_str("->")?;
                     }
-                    f.write_str(String::from_utf8_lossy(ua.value()).borrow())?;
                 }
-                f.write_str("\n")?;
+                f.write_fmt(format_args!(
+                    "\t{}/{} {}\n\t create: {}, expires: {}\n", 
+                    key.pk_algo(),
+                    key.keyid(),
+                    key.fingerprint(),
+                    SystemTimeDisplay::Some(key.creation_time()),
+                    SystemTimeDisplay::from(ka.key_expiration_time())
+                ))?;
+                if ka.primary() {
+                    f.write_str("\t  ")?;
+                    let mut first = true;
+                    for ua in cert.userids() {
+                        if first {
+                            first = false;
+                        } else {
+                            f.write_str(", ")?;
+                        }
+                        f.write_str(String::from_utf8_lossy(ua.value()).borrow())?;
+                    }
+                    f.write_str("\n")?;
+                }
             }
         }
         Ok(())
@@ -406,3 +465,39 @@ impl PasswordProvider for TTYPasswordProvider {
         rpassword::read_password_from_tty(Some(&format!("Please enter password to decrypt {}/{}: ", cert, key)))
     }
 }
+
+
+
+
+
+// Joins certificates and keyrings into a keyring, applying a filter.
+// fn filter<F>(inputs: Option<clap::Values>, output: &mut dyn io::Write, mut filter: F, to_certificate: bool) -> Result<()>
+// where F: FnMut(Cert) -> Option<Cert>,
+// {
+//     if let Some(inputs) = inputs {
+//         for name in inputs {
+//             for cert in CertParser::from_file(name)? {
+//                 let cert = cert.context(format!("Malformed certificate in keyring {:?}", name))?;
+//                 if let Some(cert) = filter(cert) {
+//                     if to_certificate {
+//                         cert.serialize(output)?;
+//                     } else {
+//                         cert.as_tsk().serialize(output)?;
+//                     }
+//                 }
+//             }
+//         }
+//     } else {
+//         for cert in CertParser::from_reader(io::stdin())? {
+//             let cert = cert.context("Malformed certificate in keyring")?;
+//             if let Some(cert) = filter(cert) {
+//                 if to_certificate {
+//                     cert.serialize(output)?;
+//                 } else {
+//                     cert.as_tsk().serialize(output)?;
+//                 }
+//             }
+//         }
+//     }
+//     Ok(())
+// }

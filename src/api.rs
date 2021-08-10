@@ -123,9 +123,7 @@ impl<'a> WriteTo for RegisterRequest<'a> {
 
         let public_key = {
             let mut buf: Vec<u8> = Vec::new();
-            let mut w = Writer::new(&mut buf, Kind::PublicKey)?;
-            self.cert.serialize(&mut w)?;
-            w.finalize()?;
+            pgp::export_publickey(self.cert, &mut buf)?;
             buf
         };
 
@@ -340,9 +338,9 @@ pub struct SubmitResponse {
 
 pub struct RecallContent {
 
-    timestamp: u64,
+    pub timestamp: u64,
 
-    comment: String
+    pub comment: String
 }
 
 impl WriteTo for RecallContent {
@@ -360,6 +358,17 @@ pub struct RecallRequest {
     submit_uuid: Uuid,
     content: RecallContent,
     keypair: KeyPair
+}
+
+impl RecallRequest {
+
+    pub fn new(submit_uuid: Uuid, content: RecallContent, keypair: KeyPair) -> Self {
+        RecallRequest {
+            submit_uuid,
+            content,
+            keypair
+        }
+    }
 }
 
 impl WriteTo for RecallRequest {
