@@ -6,7 +6,14 @@ use std::fs::File;
 use std::time::Duration;
 use std::time::SystemTime;
 use std::path::Path;
+use std::path::PathBuf;
 use std::borrow::Borrow;
+use std::hash::Hash;
+use std::hash::Hasher;
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::rc::Rc;
+use std::rc::Weak;
 
 use anyhow::anyhow;
 use anyhow::Result as GeneralResult;
@@ -18,7 +25,14 @@ use sequoia_openpgp::cert::CipherSuite;
 use sequoia_openpgp::cert::CertBuilder;
 use sequoia_openpgp::Packet;
 use sequoia_openpgp::Cert;
+use sequoia_openpgp::KeyHandle;
 use sequoia_openpgp::parse::Parse;
+use sequoia_openpgp::parse::PacketParser;
+use sequoia_openpgp::parse::stream::VerificationHelper;
+use sequoia_openpgp::parse::stream::MessageStructure;
+use sequoia_openpgp::parse::stream::MessageLayer;
+use sequoia_openpgp::parse::stream::Verifier;
+use sequoia_openpgp::parse::stream::VerifierBuilder;
 use sequoia_openpgp::cert::CertParser;
 use sequoia_openpgp::serialize::Serialize;
 use sequoia_openpgp::serialize::stream::Message;
@@ -31,6 +45,7 @@ use sequoia_openpgp::packet::key::SecretKeyMaterial;
 use sequoia_openpgp::packet::signature::SignatureBuilder;
 use sequoia_openpgp::policy::Policy;
 use sequoia_openpgp::KeyID;
+
 
 
 pub struct GenerateConfig<'a> {
@@ -167,24 +182,39 @@ pub fn load_keyring<P: AsRef<Path>>(path: P) -> GeneralResult<Vec<Cert>> {
     Ok(certs)
 }
 
-pub fn load_cert_from_keyring<P: AsRef<Path>>(path: P, fingerprint: &Option<Fingerprint>) -> GeneralResult<Option<Cert>> {
+pub fn load_cert_from_keyring<P: AsRef<Path>>(path: P, keyhandle: Option<&KeyHandle>) -> GeneralResult<Option<Cert>> {
     
     let mut parser = CertParser::from_file(path)?;
-    if let Some(fingerprint) = fingerprint {
-        for maybe_cert in parser {
-            let cert = maybe_cert?;
-            if cert.fingerprint() == *fingerprint {
-                return Ok(Some(cert));
+    match keyhandle {
+        Some(KeyHandle::KeyID(key_id)) => {
+            for maybe_cert in parser {
+                let cert = maybe_cert?;
+                for key in cert.keys() {
+                    if key.keyid() == *key_id {
+                        return Ok(Some(cert))
+                    }
+                }
             }
-        }
-    } else {
-        if let Some(maybe_cert) = parser.next() {
-            let cert = maybe_cert?;
+        },
+        Some(KeyHandle::Fingerprint(fingerprint)) => {
+            for maybe_cert in parser {
+                let cert = maybe_cert?;
+                for key in cert.keys() {
+                    if key.fingerprint() == *fingerprint {
+                        return Ok(Some(cert))
+                    }
+                }
+            }
+        },
+        None => {
             if let Some(maybe_cert) = parser.next() {
-                let _ = maybe_cert?;
-                return Ok(None)
+                let cert = maybe_cert?;
+                if let Some(maybe_cert) = parser.next() {
+                    let _ = maybe_cert?;
+                    return Ok(None)
+                }
+                return Ok(Some(cert))
             }
-            return Ok(Some(cert))
         }
     }
     
@@ -293,7 +323,7 @@ pub fn get_signing_key(cert: &Cert, p: &dyn Policy, timestamp: Option<SystemTime
     Err(anyhow::anyhow!("Found no suitable signing key on {}", cert))
 }
 
-pub fn build_signer<'a, W: 'a + io::Write + Sync + Send>(w: W, mut keypairs: Vec<KeyPair>) -> GeneralResult<Message<'a>> {
+pub fn build_signer<'a, W: 'a + Write + Sync + Send>(w: W, mut keypairs: Vec<KeyPair>) -> GeneralResult<Message<'a>> {
     if keypairs.is_empty() {
         return Err(anyhow::anyhow!("No signing keys found"));
     }
@@ -332,9 +362,100 @@ pub fn export_publickey_raw<W: Write + Sync + Send>(cert: &Cert, w: &mut W) -> G
 }
 
 
-// pub fn verify() -> GeneralResult<bool> {
 
-// }
+pub fn verify<'a, R, F, T>(cmgr: &'a CertificationManager, signed: R, f: F) -> GeneralResult<T> 
+where
+    R: 'a + Read + Sync + Send,
+    F: FnOnce(&mut dyn Read) -> GeneralResult<T>,
+{
+    let h = VerifyHelper {
+        cmgr,
+    };
+    let mut v = VerifierBuilder::from_reader(signed)?.with_policy(cmgr.policy, SystemTime::now(), h)?;
+    let value = f(&mut v)?;
+    Ok(value)
+} 
+
+struct VerifyHelper<'a> {
+    cmgr: &'a CertificationManager<'a>,
+}
+
+impl<'a> VerificationHelper for VerifyHelper<'a> {
+
+    fn inspect(&mut self, pp: &PacketParser) -> GeneralResult<()> {
+        // Do nothing.
+        let _ = pp;
+        Ok(())
+    }
+
+    fn get_certs(&mut self, ids: &[KeyHandle]) -> GeneralResult<Vec<Cert>> {
+        let mut certs = Vec::new();
+        for id in ids {
+            match id {
+                KeyHandle::KeyID(key_id) => {
+                    certs.push(self.cmgr.get(key_id).ok_or_else(|| anyhow!("cert not find: {}", key_id))?.as_ref().clone())
+                }
+                KeyHandle::Fingerprint(fingerprint) => {
+                    let mut find = false;
+                    'loop2:
+                    for cert in self.cmgr.iter() {
+                        for key in cert.keys()
+                            .with_policy(self.cmgr.policy, self.cmgr.timestamp)
+                            .alive()
+                            .revoked(false)
+                            .for_signing()
+                            .supported()
+                            .map(|ka| ka.key())
+                            .filter(|key| key.fingerprint() == *fingerprint) {
+                            certs.push(cert.as_ref().clone());
+                            find = true;
+                            break 'loop2;
+                        }
+                    }
+
+                    if !find {
+                        return Err(anyhow!("cert not find: {}", fingerprint))
+                    }
+                }
+            }
+        }
+        Ok(certs)
+    }
+
+    fn check(&mut self, structure: MessageStructure) -> GeneralResult<()> {
+
+        // In this function, we implement our signature verification
+        // policy.
+ 
+        let mut good = false;
+        for (i, layer) in structure.into_iter().enumerate() {
+            match (i, layer) {
+                // First, we are interested in signatures over the
+                // data, i.e. level 0 signatures.
+                (0, MessageLayer::SignatureGroup { results }) => {
+                    // Finally, given a VerificationResult, which only says
+                    // whether the signature checks out mathematically, we apply
+                    // our policy.
+                    match results.into_iter().next() {
+                        Some(Ok(_)) =>
+                            good = true,
+                        Some(Err(e)) =>
+                            return Err(sequoia_openpgp::Error::from(e).into()),
+                        None =>
+                            return Err(anyhow!("No signature")),
+                    }
+                },
+                _ => return Err(anyhow!("Unexpected message structure")),
+            }
+        }
+ 
+        if good {
+            Ok(()) // Good signature.
+        } else {
+            Err(anyhow!("Signature verification failed"))
+        }
+    }
+}
 
 
 
@@ -351,17 +472,15 @@ pub fn read_cert_from_console() -> GeneralResult<Cert> {
 pub struct CertsInfo<'a> {
     certs: &'a [Cert],
     key_id: Option<&'a KeyID>,
-    fingerprint: Option<&'a Fingerprint>,
     p: &'a dyn Policy
 }
 
 impl<'a> CertsInfo<'a> {
 
-    pub fn new(certs: &'a [Cert], key_id: Option<&'a KeyID>, fingerprint: Option<&'a Fingerprint>, p: &'a dyn Policy) -> Self {
+    pub fn new(certs: &'a [Cert], key_id: Option<&'a KeyID>, p: &'a dyn Policy) -> Self {
         CertsInfo {
             certs,
             key_id,
-            fingerprint,
             p
         }
     }
@@ -404,17 +523,10 @@ impl<'a> fmt::Display for CertsInfo<'a> {
 
         for cert in self.certs {
 
-            let mut mark = '*';
-            if let Some(fingerprint) = self.fingerprint {
-                if *fingerprint == cert.fingerprint() {
-                    mark = '^';
-                }
-            }
-
             if cert.is_tsk() {
-                f.write_fmt(format_args!("{} {} [Transferable Secret Key]\n", mark, cert.fingerprint()))?;
+                f.write_fmt(format_args!("* {} [Transferable Secret Key]\n", cert.fingerprint()))?;
             } else {
-                f.write_fmt(format_args!("{} {} [OpenPGP Certificate]\n", mark, cert.fingerprint()))?;
+                f.write_fmt(format_args!("* {} [OpenPGP Certificate]\n", cert.fingerprint()))?;
             }
         
             
@@ -453,6 +565,168 @@ impl<'a> fmt::Display for CertsInfo<'a> {
     }
 }
 
+
+/**
+ * 
+ */
+
+struct CertWrap(Rc<Cert>);
+
+impl std::cmp::PartialEq for CertWrap {
+    
+    fn eq(&self, other: &Self) -> bool {
+        self.0.fingerprint().eq(&other.0.fingerprint())
+    }
+
+    fn ne(&self, other: &Self) -> bool {
+        self.0.fingerprint().ne(&other.0.fingerprint())
+    }
+}
+
+impl Eq for CertWrap {
+
+}
+
+impl Hash for CertWrap {
+
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.fingerprint().hash(state);
+    }
+}
+
+pub struct CertificationManager<'a> {
+    policy: &'a dyn Policy,
+    path: PathBuf,
+    certs: HashSet<CertWrap>,
+    indexs: HashMap<KeyID, Weak<Cert>>,
+    changed: bool,
+    timestamp: SystemTime,
+}
+
+impl<'a> CertificationManager<'a> {
+
+    pub fn new(path: PathBuf, p: &'a dyn Policy) -> GeneralResult<Self> {
+        let timestamp = SystemTime::now();
+
+        let mut changed = false;
+        let mut certs = HashSet::new();
+        let mut indexs = HashMap::new();
+        
+        match File::open(path.as_path()) {
+            Ok(ifile) => {
+                for maybe_cert in CertParser::from_reader(ifile)? {
+                    let cert = Rc::new(maybe_cert?);
+                    let insert = certs.insert(CertWrap(cert.clone()));
+                    if insert {
+                        for ka in cert.keys()
+                            .with_policy(p, timestamp)
+                            .alive()
+                            .revoked(false)
+                            .for_signing()
+                            .supported() {
+                            
+                            let key_id = ka.keyid();
+                            indexs.insert(key_id, Rc::downgrade(&cert));
+                        }
+                    }
+                    changed = !insert;
+                }
+            },
+            Err(e) => {
+                if e.kind() == io::ErrorKind::NotFound {
+                    
+                } else {
+                    return Err(e.into());
+                }
+            }
+        }
+        
+        
+
+        Ok(CertificationManager {
+            policy: p,
+            path,
+            certs,
+            indexs,
+            changed,
+            timestamp
+        })
+    }
+
+    pub fn save(&mut self) -> GeneralResult<()> {
+        let mut ofile = File::create(self.path.as_path())?;
+        for CertWrap(cert) in self.certs.iter() {
+            cert.serialize(&mut ofile)?;
+        }
+        Ok(())
+    }
+
+    pub fn add(&mut self, cert: Rc<Cert>) -> bool {
+        let timestamp = SystemTime::now();
+
+        let insert = self.certs.insert(CertWrap(cert.clone()));
+        if insert {
+            for ka in cert.keys()
+                .with_policy(self.policy, timestamp)
+                .alive()
+                .revoked(false)
+                .for_signing()
+                .supported() {
+                
+                let key_id = ka.keyid();
+                self.indexs.insert(key_id, Rc::downgrade(&cert));
+            }
+            self.changed = true;
+        }
+
+        insert
+    }
+
+    pub fn remove(&mut self, cert: &Rc<Cert>) -> bool {
+
+        let remove = self.certs.remove(&CertWrap(cert.clone()));
+        if remove {
+            for ka in cert.keys()
+                .with_policy(self.policy, self.timestamp)
+                .alive()
+                .revoked(false)
+                .for_signing()
+                .supported() {
+                
+                let key_id = ka.keyid();
+                self.indexs.remove(&key_id);
+            }
+            self.changed = true;
+        }
+
+        remove
+    }
+
+    pub fn get(&self, key_id: &KeyID) -> Option<Rc<Cert>> {
+        if let Some(cert) = self.indexs.get(key_id) {
+            return Weak::upgrade(cert);
+        }
+        None
+    }
+
+    pub fn iter<'b>(&'b self) -> impl Iterator<Item = &'b Rc<Cert>> {
+        self.certs.iter().map(|v| &v.0)
+    }
+}
+
+impl<'a> Drop for CertificationManager<'a> {
+
+    fn drop(&mut self) {
+        if self.changed {
+            if let Err(e) = self.save() {
+                eprintln!("{}", e);
+            }
+            self.changed = false;
+        }
+    }
+}
+
+
 /**
  * 
  */
@@ -465,9 +739,6 @@ impl PasswordProvider for TTYPasswordProvider {
         rpassword::read_password_from_tty(Some(&format!("Please enter password to decrypt {}/{}: ", cert, key)))
     }
 }
-
-
-
 
 
 // Joins certificates and keyrings into a keyring, applying a filter.

@@ -12,6 +12,7 @@ use std::fs::File;
 
 use sequoia_openpgp::Cert;
 use sequoia_openpgp::KeyID;
+use sequoia_openpgp::KeyHandle;
 use sequoia_openpgp::policy::Policy;
 use sequoia_openpgp::policy::StandardPolicy;
 use anyhow::Result as GeneralResult;
@@ -41,6 +42,8 @@ pub enum AppError<'a, E> {
 
     InvalidParameter { name: &'static str, value: &'a str },
 
+    ErrorResponse(api::ErrorResponse),
+
     Execute(E),
 
     Unexpected(E)
@@ -55,6 +58,9 @@ impl<'a, E: error::Error> fmt::Display for AppError<'a, E> {
             }
             Self::InvalidParameter { name, value } => {
                 f.write_fmt(format_args!("invalid parameter: {} = {}", name, value))?;
+            }
+            Self::ErrorResponse(e) => {
+                f.write_fmt(format_args!("{}", e))?;
             }
             Self::Execute(e)=> {
                 f.write_fmt(format_args!("{}", e))?;
@@ -77,6 +83,9 @@ impl<'a, E: error::Error + 'static> error::Error for AppError<'a, E> {
             Self::InvalidParameter { name, value } => {
                 None
             }
+            Self::ErrorResponse(e) => {
+                None
+            }
             Self::Execute(e)=> {
                 Some(e)
             }
@@ -85,6 +94,14 @@ impl<'a, E: error::Error + 'static> error::Error for AppError<'a, E> {
             }
         }
     }
+}
+
+impl<'a> From<anyhow::Error> for AppError<'a, anyhow::Error> {
+
+    fn from(e: anyhow::Error) -> Self {
+        Self::Execute(e)
+    }
+
 }
 
 impl<'a> AppError<'a, anyhow::Error> {
@@ -103,6 +120,10 @@ impl<'a> AppError<'a, anyhow::Error> {
             Err(e) => Err(Self::InvalidParameter { name, value: s })
         }
     }
+
+    pub fn execute_with_message(msg: &'static str) -> Self {
+        Self::Execute(anyhow!(msg))
+    }
 }
 
 fn timestamp<'a>(now: SystemTime) -> Result<u64, AppError<'a, anyhow::Error>> {
@@ -114,7 +135,7 @@ fn timestamp<'a>(now: SystemTime) -> Result<u64, AppError<'a, anyhow::Error>> {
 
 //////////////////////////////////////////////////////
 
-pub fn request<I, O>(api_url: &Url, req: I) -> GeneralResult<Result<O, api::ErrorResponse>> 
+pub fn request<'a, I, O>(api_url: &Url, req: I) -> Result<O, AppError<'a, anyhow::Error>> 
 where 
     I: WriteTo<Error = anyhow::Error> + RequestInfo,
     O: DeserializeOwned
@@ -122,17 +143,15 @@ where
     let mut ab = AgentBuilder::new()
         .timeout_connect(Duration::from_secs(10));
     if let Ok(s) = env::var("HTTP_PROXY") {
-        let proxy = Proxy::new(s)?;
+        let proxy = Proxy::new(s).map_err(|e| AppError::Execute(e.into()))?;
         ab = ab.proxy(proxy)
     } else {
         if let Ok(s) = env::var("SOCKS_PROXY") {
-            let proxy = Proxy::new(s)?;
+            let proxy = Proxy::new(s).map_err(|e| AppError::Execute(e.into()))?;
             ab = ab.proxy(proxy)
         }
     }
     let agent = ab.build();
-    let mut buf = Vec::with_capacity(256 * 1024);
-    req.write_to(&mut buf)?;
 
     let method = match req.method() {
         RequestMethod::GET => "GET",
@@ -143,29 +162,39 @@ where
     };
     let url = req.url(api_url);
 
-    println!("{} {} ({})\n\n{}", &method, &url, req.content_type(), String::from_utf8_lossy(buf.as_slice()));
+    let request = agent.request_url(method, url.borrow());
 
-    let response = agent.request_url(method, url.borrow())
-        .set("Content-Type", req.content_type())
-        .send(buf.as_slice());
+    let response = if !req.content_type().is_empty() {
+
+        let mut buf = Vec::with_capacity(256 * 1024);
+        req.write_to(&mut buf)?;
+
+        println!("{} {} ({})\n\n{}", &method, &url, req.content_type(), String::from_utf8_lossy(buf.as_slice()));
+
+        request.set("Content-Type", req.content_type())
+                .send(buf.as_slice())
+    } else {
+        request.call()
+    }; 
+        
     match response {
         Ok(response) => {
             let rdr = response.into_reader();
-            Ok(Ok(serde_json::from_reader(rdr)?))
+            Ok(serde_json::from_reader(rdr).map_err(|e| AppError::Unexpected(e.into()))?)
         },
         Err(e) => {
             match e {
                 ureq::Error::Status(code, response) => {
-                    let s = response.into_string()?;
+                    let s = response.into_string().map_err(|e| AppError::Unexpected(e.into()))?;
                     let deserialized: Result<api::ErrorResponse, _> = serde_json::from_str(s.as_str());
                     let resp = match deserialized {
                         Ok(mut resp) => { resp.code = code; resp },
                         Err(e) => api::ErrorResponse { status: api::Status::Unexpected, reason: s , code }
                     };
-                    Ok(Err(resp))
+                    Err(AppError::ErrorResponse(resp))
                 },
                 ureq::Error::Transport(transport) => {
-                    Err(transport.into())
+                    Err(AppError::Unexpected(transport.into()))
                 }
             }
         }
@@ -175,46 +204,28 @@ where
 //////////////////////////////////////////////////////
 
 pub fn command_keyring(cfg: &mut config::Config) -> Result<(), AppError<'_, anyhow::Error>> {
-    let (policy, certs, key_id, fingerprint) = {
-        let cfg_data = cfg.get_data();
-        let policy = StandardPolicy::new();
-        let certs = pgp::load_keyring(AppError::unwrap_option(&cfg_data.cert_file, "config.cert_file")?)
-            .map_err(|e| AppError::Execute(e.into()))?;
-        let fingerprint = cfg_data.fingerprint.as_ref();
-        let key_id = cfg_data.key_id.as_ref();
-        (policy, certs, key_id, fingerprint)
-    };
-    println!("\n{}", pgp::CertsInfo::new(certs.as_slice(), key_id, fingerprint, &policy));
+    let cfg_data = cfg.get_data();
+    let policy = StandardPolicy::new();
+    let certs = pgp::load_keyring(AppError::unwrap_option(&cfg_data.cert_file, "config.cert_file")?)?;
+    let key_id = cfg_data.key_id.as_ref();
 
-    if certs.len() == 1 {
-        if cfg.get_data().fingerprint.is_none() {
-            let fingerprint = certs[0].fingerprint();
-            println!("update config.fingerprint = {}", &fingerprint);
-            cfg.get_data_mut().fingerprint = Some(fingerprint);
-        }
-    }
+    println!("\n{}", pgp::CertsInfo::new(certs.as_slice(), key_id, &policy));
 
     Ok(())
 }
 
-//////////////////////////////////////////////////////
-
 pub fn command_register<'a>(cfg: &mut config::Config, server_name: &'a str) -> Result<(), AppError<'a, anyhow::Error>> {
-    let (policy, cert, key_id, api_url) = {
-        let cfg_data = cfg.get_data();
-        let policy = StandardPolicy::new();
-        let cert = pgp::load_cert_from_keyring(
-            AppError::unwrap_option(&cfg_data.cert_file, "config.cert_file")?,
-            &cfg_data.fingerprint
-        )
-        .map_err(|e| AppError::Execute(e.into()))?
-        .ok_or_else(|| AppError::MissingParameter { name: "config.fingerprint" })?;
-        let key_id = AppError::unwrap_option(&cfg_data.key_id, "config.key_id")?;
-        let api_url = AppError::unwrap_option(&cfg_data.api_url, "config.api_url" )?;
-        (policy, cert, key_id, api_url)
-    };
-    let keypair = pgp::get_signing_key(&cert, &policy, Some(SystemTime::now()), key_id, &pgp::TTYPasswordProvider)
-        .map_err(|e| AppError::Execute(e))?;
+    let cfg_data = cfg.get_data();
+    let policy = StandardPolicy::new();
+    let key_id = AppError::unwrap_option(&cfg_data.key_id, "config.key_id")?;
+    let cert = pgp::load_cert_from_keyring(
+        AppError::unwrap_option(&cfg_data.cert_file, "config.cert_file")?,
+        Some(&KeyHandle::KeyID(key_id.clone()))
+    )?
+    .ok_or_else(|| AppError::MissingParameter { name: "config.fingerprint" })?;
+    let api_url = AppError::unwrap_option(&cfg_data.api_url, "config.api_url" )?;
+
+    let keypair = pgp::get_signing_key(&cert, &policy, Some(SystemTime::now()), key_id, &pgp::TTYPasswordProvider)?;
 
     let req = api::RegisterRequest::new(
         api::RegisterContent{ server_name: server_name.to_string() }, 
@@ -222,41 +233,27 @@ pub fn command_register<'a>(cfg: &mut config::Config, server_name: &'a str) -> R
         keypair
     );
 
-    match request::<api::RegisterRequest, api::RegisterResponse>(api_url, req)
-            .map_err(|e| AppError::Execute(e))? {
-        Ok(s) => {
-            println!("succeed\n+ server_uuid: {}", s.uuid);
-            cfg.get_data_mut().server_uuid = Some(s.uuid);
-        }
-        Err(e) => {
-            eprintln!("failed: {}", e.reason);
-        }
-    }
+    let s = request::<api::RegisterRequest, api::RegisterResponse>(api_url, req)?;
+    println!("succeed\n+ server_uuid: {}", s.uuid);
+    cfg.get_data_mut().server_uuid = Some(s.uuid);
 
     Ok(())
 }
 
 pub fn command_unregister<'a>(cfg: &mut config::Config, comment: &'a str) -> Result<(), AppError<'a, anyhow::Error>> {
-    
-    let (policy, cert, key_id, api_url, server_uuid, comment) = {
-        let cfg_data = cfg.get_data();
-        let policy = StandardPolicy::new();
-        let cert = pgp::load_cert_from_keyring(
-            AppError::unwrap_option(&cfg_data.cert_file, "config.cert_file")?,
-            &cfg_data.fingerprint
-        )
-        .map_err(|e| AppError::Execute(e.into()))?
-        .ok_or_else(|| AppError::MissingParameter { name: "config.fingerprint" })?;
-        let key_id = AppError::unwrap_option(&cfg_data.key_id, "config.key_id")?;
-        let api_url = AppError::unwrap_option(&cfg_data.api_url, "config.api_url" )?;
-        let server_uuid = AppError::unwrap_option(&cfg_data.server_uuid, "config.server_uuid" )?.clone();
-        let comment = comment.to_string();
+    let cfg_data = cfg.get_data();
+    let policy = StandardPolicy::new();
+    let key_id = AppError::unwrap_option(&cfg_data.key_id, "config.key_id")?;
+    let cert = pgp::load_cert_from_keyring(
+        AppError::unwrap_option(&cfg_data.cert_file, "config.cert_file")?,
+        Some(&KeyHandle::KeyID(key_id.clone()))
+    )?
+    .ok_or_else(|| AppError::MissingParameter { name: "config.fingerprint" })?;    
+    let api_url = AppError::unwrap_option(&cfg_data.api_url, "config.api_url" )?;
+    let server_uuid = AppError::unwrap_option(&cfg_data.server_uuid, "config.server_uuid" )?.clone();
+    let comment = comment.to_string();
 
-        (policy, cert, key_id, api_url, server_uuid, comment)
-    };
-
-    let keypair = pgp::get_signing_key(&cert, &policy, Some(SystemTime::now()), key_id, &pgp::TTYPasswordProvider)
-        .map_err(|e| AppError::Execute(e))?;
+    let keypair = pgp::get_signing_key(&cert, &policy, Some(SystemTime::now()), key_id, &pgp::TTYPasswordProvider)?;
     let req = api::UnregisterRequest::new(
         api::UnregisterContent{ 
             timestamp: timestamp(SystemTime::now())?,
@@ -266,39 +263,30 @@ pub fn command_unregister<'a>(cfg: &mut config::Config, comment: &'a str) -> Res
         server_uuid
     );
 
-    match request::<api::UnregisterRequest, api::UnregisterResponse>(api_url, req)
-        .map_err(|e| AppError::Execute(e))? {
-        Ok(s) => {
-            println!("succeed\n- server_uuid: {}", s.uuid);
-            cfg.get_data_mut().server_uuid = None;
-        }
-        Err(e) => {
-            eprintln!("failed: {}", e.reason);
-        }
-    }
+    let s = request::<api::UnregisterRequest, api::UnregisterResponse>(api_url, req)?;
+    println!("succeed\n- server_uuid: {}", s.uuid);
+    cfg.get_data_mut().server_uuid = None;
+       
     Ok(())
 }
 
 
 pub fn command_submit<'a>(cfg: &mut config::Config, player_uuid: &'a str, points: &'a str, comment: &'a str) -> Result<(), AppError<'a, anyhow::Error>> {
-    
     let cfg_data = cfg.get_data();
     let policy = StandardPolicy::new();
+    let key_id = AppError::unwrap_option(&cfg_data.key_id, "config.key_id")?;
     let cert = pgp::load_cert_from_keyring(
         AppError::unwrap_option(&cfg_data.cert_file, "config.cert_file")?,
-        &cfg_data.fingerprint
-    )
-    .map_err(|e| AppError::Execute(e.into()))?
+        Some(&KeyHandle::KeyID(key_id.clone()))
+    )?
     .ok_or_else(|| AppError::MissingParameter { name: "config.fingerprint" })?;
-    let key_id = AppError::unwrap_option(&cfg_data.key_id, "config.key_id")?;
     let api_url = AppError::unwrap_option(&cfg_data.api_url, "config.api_url" )?;
     let server_uuid = AppError::unwrap_option(&cfg_data.server_uuid, "config.server_uuid" )?.clone();
     let player_uuid = AppError::parse(player_uuid, "player_uuid")?;
     let points: f32 = AppError::parse(points, "points")?;
     let comment = comment.to_string();
 
-    let keypair = pgp::get_signing_key(&cert, &policy, Some(SystemTime::now()), key_id, &pgp::TTYPasswordProvider)
-        .map_err(|e| AppError::Execute(e))?;
+    let keypair = pgp::get_signing_key(&cert, &policy, Some(SystemTime::now()), key_id, &pgp::TTYPasswordProvider)?;
     let req = api::SubmitRequest::new(
         api::SubmitContent{ 
             uuid: server_uuid,
@@ -310,36 +298,27 @@ pub fn command_submit<'a>(cfg: &mut config::Config, player_uuid: &'a str, points
         keypair
     );
 
-    match request::<api::SubmitRequest, api::SubmitResponse>(api_url, req)
-        .map_err(|e| AppError::Execute(e))? {
-        Ok(s) => {
-            println!("succeed\n+ record_uuid: {}", s.uuid);
-        }
-        Err(e) => {
-            eprintln!("failed: {:?}", e);
-        }
-    }
+    let s = request::<api::SubmitRequest, api::SubmitResponse>(api_url, req)?;
+    println!("succeed\n+ record_uuid: {}", s.uuid);
+        
     Ok(())
 }
 
 pub fn command_recall<'a>(cfg: &mut config::Config, record_uuid: &'a str, comment: &'a str) -> Result<(), AppError<'a, anyhow::Error>> {
-    
     let cfg_data = cfg.get_data();
     let policy = StandardPolicy::new();
+    let key_id = AppError::unwrap_option(&cfg_data.key_id, "config.key_id")?;
     let cert = pgp::load_cert_from_keyring(
         AppError::unwrap_option(&cfg_data.cert_file, "config.cert_file")?,
-        &cfg_data.fingerprint
-    )
-    .map_err(|e| AppError::Execute(e.into()))?
+        Some(&KeyHandle::KeyID(key_id.clone()))
+    )?
     .ok_or_else(|| AppError::MissingParameter { name: "config.fingerprint" })?;
-    let key_id = AppError::unwrap_option(&cfg_data.key_id, "config.key_id")?;
     let api_url = AppError::unwrap_option(&cfg_data.api_url, "config.api_url" )?;
     let server_uuid = AppError::unwrap_option(&cfg_data.server_uuid, "config.server_uuid")?.clone();
     let record_uuid = AppError::parse(record_uuid, "record_uuid")?;
     let comment = comment.to_string();
 
-    let keypair = pgp::get_signing_key(&cert, &policy, Some(SystemTime::now()), key_id, &pgp::TTYPasswordProvider)
-        .map_err(|e| AppError::Execute(e))?;
+    let keypair = pgp::get_signing_key(&cert, &policy, Some(SystemTime::now()), key_id, &pgp::TTYPasswordProvider)?;
     let req = api::RecallRequest::new(
         record_uuid,
         api::RecallContent{
@@ -349,133 +328,283 @@ pub fn command_recall<'a>(cfg: &mut config::Config, record_uuid: &'a str, commen
         keypair
     );
 
-    match request::<api::RecallRequest, api::RecallResponse>(api_url, req)
-            .map_err(|e| AppError::Execute(e))? {
-        Ok(s) => {
-            println!("succeed\n- record_uuid: {}", s.uuid);
-        }
-        Err(e) => {
-            eprintln!("failed: {:?}", e);
-        }
-    }
+    let s = request::<api::RecallRequest, api::RecallResponse>(api_url, req)?;
+    println!("succeed\n- record_uuid: {}", s.uuid);
+        
     Ok(())
 }
 
 
-pub fn command_certs_add<'a>(cfg: &mut config::Config, server_uuid: &'a str, name: &'a str, key_id: &'a str, trust: &'a str) -> Result<(), AppError<'a, anyhow::Error>> {
+pub fn command_cert_add<'a>(cfg: &mut config::Config, server_uuid: &'a str, name: &'a str, key_id: &'a str, trust: &'a str) -> Result<(), AppError<'a, anyhow::Error>> {
+
+    let server_uuid: Uuid = AppError::parse(server_uuid, "server_uuid")?;
+    let key_id: KeyID = AppError::parse(key_id, "key_id")?;
+    let name = name.to_owned();
+    let trust: u32 = AppError::parse(trust, "trust")?;
 
     let policy = StandardPolicy::new();
+    let mut cmgr = pgp::CertificationManager::new(
+        config::current_exe_path("servers.pgp").map_err(|e| AppError::Unexpected(e.into()))?
+        , &policy
+    )?;
 
-    let dir = {
-        let mut dir = config::current_exe_path().map_err(|e| AppError::Unexpected(e.into()))?;
-        dir.push("servers");
-        if !dir.is_dir() {
-            std::fs::create_dir_all(dir.as_path()).map_err(|e| AppError::Unexpected(e.into()))?;
+    if cmgr.get(&key_id).is_none() {
+        let cert = pgp::read_cert_from_console()?;
+        if !pgp::check_key(&cert, &policy, Some(SystemTime::now()), &key_id)? {
+            return Err(AppError::execute_with_message("key_id not correspond to cert"));
         }
-        dir
-    };
-    let insert = certs_add(
-        cfg, 
-        AppError::parse(server_uuid, "server_uuid")?, 
-        name.to_owned(), 
-        AppError::parse(key_id, "key_id")?, 
-        AppError::parse(trust, "trust")?, 
-        pgp::read_cert_from_console,
-        &policy,
-        dir
-    )
-    .map_err(|e| AppError::Execute(e.into()))?;
 
-    if !insert {
-        Err(AppError::Execute(anyhow!("server exsit already")))
-    } else {
-        Ok(())
-    }
-}
 
-pub fn certs_add<'a, P, C>(cfg: &mut config::Config, server_uuid: Uuid, name: String, key_id: KeyID, trust: u32, cert: C, p: &dyn Policy, folder: P) -> GeneralResult<bool> 
-where
-    P: AsRef<Path>,
-    C: FnOnce() -> GeneralResult<Cert>
-{
-    use std::collections::hash_map::Entry;
-
-    let servers = &mut cfg.get_data_mut().servers;
-
-    let insert = match servers.entry(server_uuid) {
-        Entry::Occupied(o) => {
-            false
-        }
-        Entry::Vacant(v) => {
-            let cert = cert()?;
-            if !pgp::check_key(&cert, p, Some(SystemTime::now()), &key_id)? {
-                return Err(anyhow!("key_id {} doesn't exist in {}", &key_id, &cert))
-            }
-
-            let folder = folder.as_ref();
-    
-            {
-                let path = folder.join(server_uuid.to_simple_ref().encode_upper(&mut Uuid::encode_buffer()));
-                let mut ofile = File::create(path)?;
-                pgp::export_publickey_raw(&cert, &mut ofile)?;
-            }
-            
+        if cmgr.add(cert.into()) {
             let server_data = config::ServerData {
                 name,
                 key_id,
-                fingerprint: cert.fingerprint(),
                 trust
             };
-
-            v.insert(server_data);
-
-            true
+            cfg.get_data_mut().servers.insert(server_uuid, server_data);
+            
+            println!("added.");
+        } else {
+            return Err(AppError::execute_with_message("existed"));
         }
-    };
+    } else {
+        return Err(AppError::execute_with_message("existed"));
+    }
 
-    Ok(insert)
+    Ok(())
+}
+
+// pub fn cert_add<'a, P, C>(cfg: &mut config::Config, server_uuid: Uuid, name: String, key_id: KeyID, trust: u32, cert: C, p: &dyn Policy, folder: P) -> GeneralResult<bool> 
+// where
+//     P: AsRef<Path>,
+//     C: FnOnce() -> GeneralResult<Cert>
+// {
+//     use std::collections::hash_map::Entry;
+
+//     let servers = &mut cfg.get_data_mut().servers;
+
+//     let insert = match servers.entry(server_uuid) {
+//         Entry::Occupied(o) => {
+//             false
+//         }
+//         Entry::Vacant(v) => {
+//             let cert = cert()?;
+//             if !pgp::check_key(&cert, p, Some(SystemTime::now()), &key_id)? {
+//                 return Err(anyhow!("key_id {} doesn't exist in {}", &key_id, &cert))
+//             }
+
+//             let folder = folder.as_ref();
+    
+//             {
+//                 let path = folder.join(server_uuid.to_simple_ref().encode_upper(&mut Uuid::encode_buffer()));
+//                 let mut ofile = File::create(path)?;
+//                 pgp::export_publickey_raw(&cert, &mut ofile)?;
+//             }
+            
+//             let server_data = config::ServerData {
+//                 name,
+//                 key_id,
+//                 fingerprint: cert.fingerprint(),
+//                 trust
+//             };
+
+//             v.insert(server_data);
+
+//             true
+//         }
+//     };
+
+//     Ok(insert)
+// }
+
+
+pub fn command_cert_remove<'a>(cfg: &mut config::Config, server_uuid: &'a str) -> Result<(), AppError<'a, anyhow::Error>> {
+    let server_uuid: Uuid = AppError::parse(server_uuid, "server_uuid")?;
+    let policy = StandardPolicy::new();
+    let mut cmgr = pgp::CertificationManager::new(
+        config::current_exe_path("servers.pgp").map_err(|e| AppError::Unexpected(e.into()))?
+        , &policy
+    )?;
+
+    if let Some(d) = cfg.get_data().servers.get(&server_uuid) {
+        if let Some(cert) = cmgr.get(&d.key_id) {
+            cmgr.remove(&cert);
+            cfg.get_data_mut().servers.remove(&server_uuid);
+            println!("removed.")
+        } else {
+            return Err(AppError::execute_with_message("certification not exsit"));
+        }
+    } else {
+        return Err(AppError::execute_with_message("server not exsit"));
+    }
+
+    Ok(())
+}
+
+// pub fn cert_remove<'a, P: AsRef<Path>>(cfg: &mut config::Config, server_uuid: &Uuid, folder: P) -> GeneralResult<bool> {
+
+//     let remove = match cfg.get_data_mut().servers.remove(server_uuid) {
+//         Some(data) => {
+//             let folder = folder.as_ref();
+//             let path = folder.join(server_uuid.to_simple_ref().encode_upper(&mut Uuid::encode_buffer()));
+//             if path.is_file() {
+//                 std::fs::remove_file(path)?;
+//             }
+//             true
+//         }
+//         None => {
+//             false
+//         }
+//     };
+
+//     Ok(remove)
+// }
+
+
+pub fn command_server_list<'a>(cfg: &config::Config, limit: Option<&'a str>) -> Result<(), AppError<'a, anyhow::Error>> {
+    let cfg_data = cfg.get_data();
+    let api_url = AppError::unwrap_option(&cfg_data.api_url, "config.api_url" )?;
+    
+    let limit = if let Some(s) = limit {
+        Some(AppError::parse(s, "limit")?)
+    } else {
+        None
+    };
+    
+    let req = api::ServerListRequest::new(limit);
+    let s = request::<api::ServerListRequest, api::ServerListResponse>(api_url, req)?;
+    
+    struct ServerDataDisplay<'a>(&'a api::ServerData);
+
+    impl<'a> fmt::Display for ServerDataDisplay<'a> {
+        
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            let data = self.0;  
+            let mut buf = Vec::new();
+            if let Ok(_) = pgp::export_publickey(&data.public_key, &mut buf) {
+                f.write_fmt(format_args!("server_name:{}\nserver_uuid: {}\nkey_id:{}\n\n", data.server_name.as_str(), data.uuid.to_hyphenated_ref(), data.key_id))?;
+                f.write_str(String::from_utf8_lossy(buf.as_slice()).borrow())?;
+            }
+            Ok(())
+        }
+    }
+
+    for d in &s.servers {
+        println!("====================\n{}\n\n", ServerDataDisplay(d));
+    }
+
+    Ok(())
 }
 
 
-pub fn command_certs_remove<'a>(cfg: &mut config::Config, server_uuid: &'a str) -> Result<(), AppError<'a, anyhow::Error>> {
+pub fn command_get_submit<'a>(cfg: &config::Config, record_uuid: &'a str) -> Result<(), AppError<'a, anyhow::Error>> {
 
-    let dir = {
-        let mut dir = config::current_exe_path().map_err(|e| AppError::Unexpected(e.into()))?;
-        dir.push("servers");
-        if !dir.is_dir() {
-            return Err(AppError::Unexpected(anyhow!("servers folder disappear")))
+    let cfg_data = cfg.get_data();
+    let policy = StandardPolicy::new();
+    let api_url = AppError::unwrap_option(&cfg_data.api_url, "config.api_url" )?;
+    let record_uuid: Uuid = AppError::parse(record_uuid, "record_uuid")?;
+    
+    let mut cmgr = pgp::CertificationManager::new(
+        config::current_exe_path("servers.pgp").map_err(|e| AppError::Unexpected(e.into()))?
+        , &policy
+    )?;
+
+    let req = api::GetSubmitRequest::new(record_uuid);
+    let s = request::<api::GetSubmitRequest, api::GetSubmitResponse>(api_url, req)?;
+
+    fn transfer(r: &mut dyn io::Read) -> GeneralResult<api::SubmitContent> {
+        api::ReadFrom::read_from(r)
+    }
+
+    match pgp::verify(&cmgr, s.content.as_bytes(), transfer) {
+        Ok(d) => {
+            let server_uuid = &d.uuid;
+            let server_data = cfg_data.servers.get(server_uuid)
+                .ok_or_else(|| AppError::Unexpected(anyhow!("missing congfig.servers[{}]", server_uuid.to_hyphenated_ref())))?;
+            println!("+ Verified Message");
+            println!("{}", ServerDataDisplay(server_data, server_uuid));
+            println!("{:#?}", &d);
         }
-        dir
-    };
-    let remove = certs_remove(
-        cfg, 
-        &AppError::parse(server_uuid, "server_uuid")?, 
-        dir
-    )
-    .map_err(|e| AppError::Execute(e.into()))?;
+        Err(e) => {
+            println!("server_uuid: {}\n", s.server_uuid.to_hyphenated_ref());
+            println!("{}\n", &s.content);
+            return Err(e.into())
+        }
+    }
 
-    if !remove {
-        Err(AppError::Execute(anyhow!("server exsit already")))
-    } else {
-        Ok(())
+    Ok(())
+}
+
+struct ServerDataDisplay<'a>(&'a config::ServerData, &'a Uuid);
+
+impl<'a> fmt::Display for ServerDataDisplay<'a> {
+
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_fmt(format_args!(
+            "server: {} [{}]\n   key: {}   trust: {}\n", 
+            self.0.name.as_str(),
+            self.1.to_hyphenated_ref(),
+            self.0.key_id,
+            self.0.trust
+        ))
     }
 }
 
-pub fn certs_remove<'a, P: AsRef<Path>>(cfg: &mut config::Config, server_uuid: &Uuid, folder: P) -> GeneralResult<bool> {
 
-    let remove = match cfg.get_data_mut().servers.remove(server_uuid) {
-        Some(data) => {
-            let folder = folder.as_ref();
-            let path = folder.join(server_uuid.to_simple_ref().encode_upper(&mut Uuid::encode_buffer()));
-            if path.is_file() {
-                std::fs::remove_file(path)?;
-            }
-            true
-        }
-        None => {
-            false
-        }
+
+pub enum ServerHandleWrap<'a> {
+    UUID(&'a str),
+    KeyID(&'a str),
+}
+
+pub fn command_get_server_submit<'a>(cfg: &config::Config, handle: ServerHandleWrap<'a>, limit: Option<&'a str>, after: Option<&'a str>) -> Result<(), AppError<'a, anyhow::Error>> {
+
+    let cfg_data = cfg.get_data();
+    let policy = StandardPolicy::new();
+    let api_url = AppError::unwrap_option(&cfg_data.api_url, "config.api_url" )?;
+    let handle: api::ServerHandle = match handle {
+        ServerHandleWrap::UUID(s) => AppError::parse::<Uuid>(s, "server_uuid")?.into(),
+        ServerHandleWrap::KeyID(s) => AppError::parse::<KeyID>(s, "key_id")?.into(),
     };
+    let limit = if let Some(s) = limit {
+        Some(AppError::parse(s, "limit")?)
+    } else {
+        None
+    };
+    let after = if let Some(s) = after {
+        None // TODO deserialize time
+    } else {
+        None
+    };
+    
+    let mut cmgr = pgp::CertificationManager::new(
+        config::current_exe_path("servers.pgp").map_err(|e| AppError::Unexpected(e.into()))?
+        , &policy
+    )?;
 
-    Ok(remove)
+    let req = api::GetServerSubmitRequest::new(handle, limit, after);
+    let sc = request::<api::GetServerSubmitRequest, api::GetServerSubmitResponse>(api_url, req)?;
+
+    fn transfer(r: &mut dyn io::Read) -> GeneralResult<api::SubmitContent> {
+        api::ReadFrom::read_from(r)
+    }
+
+    for s in &sc.submits {
+        match pgp::verify(&cmgr, s.content.as_bytes(), transfer) {
+            Ok(d) => {
+                let server_uuid = &d.uuid;
+                let server_data = cfg_data.servers.get(server_uuid)
+                    .ok_or_else(|| AppError::Unexpected(anyhow!("missing congfig.servers[{}]", server_uuid.to_hyphenated_ref())))?;
+                println!("+ Verified Message");
+                println!("{}", ServerDataDisplay(server_data, server_uuid));
+                println!("{:#?}", &d);
+            }
+            Err(e) => {
+                println!("server_uuid: {}\n", s.server_uuid.to_hyphenated_ref());
+                println!("{}\n", &s.content);
+            }
+        }
+    }
+
+    Ok(())
 }

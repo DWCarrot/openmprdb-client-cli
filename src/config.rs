@@ -25,9 +25,15 @@ use sequoia_openpgp::KeyID;
 use sequoia_openpgp::Fingerprint;
 
 
-pub fn current_exe_path() -> io::Result<PathBuf> {
+pub fn current_exe_path<P: AsRef<Path>>(to_join: P) -> io::Result<PathBuf> {
     let exe = env::current_exe()?;
-    exe.parent().map(PathBuf::from).ok_or_else(|| io::Error::from(io::ErrorKind::Other))
+    if let Some(path) = exe.parent() {
+        let mut path = PathBuf::from(path);
+        path.push(to_join);
+        Ok(path)
+    } else {
+        Err(io::Error::from(io::ErrorKind::Other))
+    }
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -42,12 +48,6 @@ pub struct ConfigData {
     #[serde(serialize_with = "serialize_optional_key_id")]
     #[serde(deserialize_with = "deserialize_optional_fromstr")]
     pub key_id: Option<KeyID>,
-
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(default)]
-    #[serde(serialize_with = "serialize_optional_fingerprint")]
-    #[serde(deserialize_with = "deserialize_optional_fromstr")]
-    pub fingerprint: Option<Fingerprint>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
@@ -73,13 +73,8 @@ pub struct ServerData {
     #[serde(serialize_with = "serialize_key_id")]
     pub key_id: KeyID,
 
-    #[serde(deserialize_with = "deserialize_fromstr")]
-    #[serde(serialize_with = "serialize_fingerprint")]
-    pub fingerprint: Fingerprint,
-
     pub trust: u32,
 }
-
 
 fn serialize_key_id<S: Serializer>(v: &KeyID, s: S) -> Result<S::Ok, S::Error> {
     s.serialize_str(v.to_hex().as_str())
@@ -113,12 +108,53 @@ fn serialize_optional_api_url<S: Serializer>(v: &Option<Url>, s: S) -> Result<S:
     }
 }
 
-fn deserialize_optional_fromstr<'de, D: Deserializer<'de>, T: FromStr>(d: D) -> Result<Option<T>, D::Error> {
+pub fn deserialize_fromstr<'de, D, T, TE>(d: D) -> Result<T, D::Error> 
+where
+    D: Deserializer<'de>,
+    T: FromStr<Err = TE>,
+    TE: fmt::Display,
+{
     use std::marker::PhantomData;
 
-    struct InnerVisitor<T>(PhantomData<T>);
+    struct InnerVisitor<T, TE>(PhantomData<(T, TE)>);
 
-    impl<'de, T: FromStr> Visitor<'de> for InnerVisitor<T> {
+    impl<'de, T, TE> Visitor<'de> for InnerVisitor<T, TE> 
+    where
+        T: FromStr<Err = TE>,
+        TE: fmt::Display,
+    {
+        type Value = T;
+        
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.write_str("string liked")
+        }
+
+        fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
+            match FromStr::from_str(v) {
+                Ok(v) => Ok(v),
+                Err(e) =>Err(de::Error::custom(e))
+            }
+        }
+    }
+
+    d.deserialize_str(InnerVisitor(PhantomData))
+}
+
+fn deserialize_optional_fromstr<'de, D, T, TE>(d: D) -> Result<Option<T>, D::Error> 
+where
+    D: Deserializer<'de>,
+    T: FromStr<Err = TE>,
+    TE: fmt::Display,
+{
+    use std::marker::PhantomData;
+
+    struct InnerVisitor<T, TE>(PhantomData<(T, TE)>);
+
+    impl<'de, T, TE> Visitor<'de> for InnerVisitor<T, TE> 
+    where
+        T: FromStr<Err = TE>,
+        TE: fmt::Display,
+    {
         type Value = Option<T>;
         
         fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -136,37 +172,13 @@ fn deserialize_optional_fromstr<'de, D: Deserializer<'de>, T: FromStr>(d: D) -> 
         fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
             match FromStr::from_str(v) {
                 Ok(v) => Ok(Some(v)),
-                Err(e) =>Err(de::Error::invalid_value(de::Unexpected::Str(v), &self))
+                Err(e) =>Err(de::Error::custom(e))
             }
         }
     }
 
     d.deserialize_option(InnerVisitor(PhantomData))
 }
-
-fn deserialize_fromstr<'de, D: Deserializer<'de>, T: FromStr>(d: D) -> Result<T, D::Error> {
-    use std::marker::PhantomData;
-
-    struct InnerVisitor<T>(PhantomData<T>);
-
-    impl<'de, T: FromStr> Visitor<'de> for InnerVisitor<T> {
-        type Value = T;
-        
-        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-            f.write_str("string liked")
-        }
-
-        fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
-            match FromStr::from_str(v) {
-                Ok(v) => Ok(v),
-                Err(e) =>Err(de::Error::invalid_value(de::Unexpected::Str(v), &self))
-            }
-        }
-    }
-
-    d.deserialize_str(InnerVisitor(PhantomData))
-}
-
 
 
 pub struct Config {
@@ -177,9 +189,8 @@ pub struct Config {
 
 impl Config {
 
-    pub fn new() -> GeneralResult<Self> {
+    pub fn new(path: PathBuf) -> GeneralResult<Self> {
         let mut changed = false;
-        let path = current_exe_path()?.join("config");
         let cfg = match File::open(path.as_path()) {
             Ok(ifile) => {
                 let mut cfg: ConfigData = serde_json::from_reader(ifile)?;
@@ -215,13 +226,10 @@ impl Config {
     }
 
     pub fn save(&mut self) -> GeneralResult<()> {
-        if self.changed {
-            let ofile = File::create(self.path.as_path())?;
-            let formatter = json_ser::PrettyFormatter::with_indent(b"    ");
-            let mut ser = json_ser::Serializer::with_formatter(ofile, formatter);
-            self.cfg.serialize(&mut ser)?;
-            self.changed = false;
-        }
+        let ofile = File::create(self.path.as_path())?;
+        let formatter = json_ser::PrettyFormatter::with_indent(b"    ");
+        let mut ser = json_ser::Serializer::with_formatter(ofile, formatter);
+        self.cfg.serialize(&mut ser)?;
         Ok(())
     }
 
@@ -253,16 +261,6 @@ impl Config {
     pub fn set_key_id(&mut self, v: &str) -> bool {
         if let Ok(key_id) = KeyID::from_str(v) {
             self.cfg.key_id = Some(key_id);
-            self.changed = true;
-            true
-        } else {
-            false
-        }
-    }
-
-    pub fn set_fingerprint(&mut self, v: &str) -> bool {
-        if let Ok(fingerprint) = Fingerprint::from_str(v) {
-            self.cfg.fingerprint = Some(fingerprint);
             self.changed = true;
             true
         } else {
@@ -326,8 +324,11 @@ impl Config {
 impl Drop for Config {
 
     fn drop(&mut self) {
-        if let Err(e) = self.save() {
-            eprintln!("{}", e);
+        if self.changed {
+            if let Err(e) = self.save() {
+                eprintln!("{}", e);
+            }
+            self.changed = false;
         }
     }
 }

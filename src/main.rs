@@ -10,6 +10,7 @@ use std::path::Path;
 use clap::App;
 use clap::SubCommand;
 use clap::Arg;
+use clap::ArgGroup;
 use uuid::Uuid;
 use sequoia_openpgp::KeyID;
 use sequoia_openpgp::Fingerprint;
@@ -193,15 +194,59 @@ fn main() {
                                 .help("uuid of the target server registered in OpenMPRDB to remove")
                         )
                 )
+        )
+        .subcommand(
+            SubCommand::with_name("server")
+                .help("get & show server data")
+                .arg(
+                    Arg::with_name("limit")
+                        .long("limit")
+                        .takes_value(true)
+                )
+        )
+        .subcommand(
+            SubCommand::with_name("record")
+                .help("get & show record data")
+                .arg(
+                    Arg::with_name("submit_uuid")
+                        .long("submit-uuid")
+                        .takes_value(true)
+                )
+                .arg(
+                    Arg::with_name("server_uuid")
+                        .long("server-uuid")
+                        .takes_value(true)
+                )
+                .arg(
+                    Arg::with_name("key_id")
+                        .long("key-id")
+                        .takes_value(true)
+                )
+                .group(
+                    ArgGroup::with_name("according")
+                        .args(&["submit_uuid", "server_uuid", "key_id"])
+                        .required(true)
+                )
+                .arg(
+                    Arg::with_name("limit")
+                        .long("limit")
+                        .takes_value(true)
+                )
+                .arg(
+                    Arg::with_name("after")
+                        .long("after")
+                        .takes_value(true)
+                )
         );
     
 
 
     let matches = app.get_matches();
+    let mut cfg = config::Config::new(config::current_exe_path("config").unwrap()).unwrap();
 
     match matches.subcommand() {
         ("config", Some(sub_matches)) => {
-            let mut cfg = config::Config::new().unwrap();
+            
             if let Some(s) = sub_matches.value_of("cert_file") {
                 if s != "?" {
                     cfg.set_cert_file(s);
@@ -213,12 +258,6 @@ fn main() {
                     cfg.set_key_id(s);
                 }
                 println!("key_id = {}", OptionalKeyIDDisplay(&cfg.get_data().key_id))
-            }
-            if let Some(s) = sub_matches.value_of("fingerprint") {
-                if s != "?" {
-                    cfg.set_fingerprint(s);
-                }
-                println!("key_id = {}", OptionalFingerprintDisplay(&cfg.get_data().fingerprint))
             }
             if let Some(s) = sub_matches.value_of("api_url") {
                 if s != "?" {
@@ -234,7 +273,6 @@ fn main() {
             }
         },
         ("keyring", Some(sub_matches)) => {
-            let mut cfg = config::Config::new().unwrap();
             if let Some(s) = sub_matches.value_of("cert_file") {
                 cfg.set_cert_file(s);
                 cfg.get_data_mut().key_id = None;
@@ -247,7 +285,6 @@ fn main() {
             app::command_keyring(&mut cfg).unwrap();
         },
         ("register", Some(sub_matches)) => {
-            let mut cfg = config::Config::new().unwrap();
             if let Some(s) = sub_matches.value_of("cert_file") {
                 cfg.set_cert_file(s);
                 cfg.get_data_mut().key_id = None;
@@ -268,7 +305,6 @@ fn main() {
             .unwrap()
         },
         ("unregister", Some(sub_matches)) => {
-            let mut cfg = config::Config::new().unwrap();
             app::command_unregister(
                 &mut cfg, 
                 sub_matches.value_of("comment").unwrap_or_default()
@@ -276,7 +312,6 @@ fn main() {
             .unwrap();
         },
         ("submit", Some(sub_matches)) => {
-            let mut cfg = config::Config::new().unwrap();
             app::command_submit(
                 &mut cfg, 
                 sub_matches.value_of("player_uuid").unwrap(),
@@ -286,7 +321,6 @@ fn main() {
             .unwrap();
         },
         ("recall", Some(sub_matches)) => {
-            let mut cfg = config::Config::new().unwrap();
             app::command_recall(
                 &mut cfg, 
                 sub_matches.value_of("record_uuid").unwrap(),
@@ -295,10 +329,9 @@ fn main() {
             .unwrap();
         }
         ("cert", Some(sub_matches)) => {
-            let mut cfg = config::Config::new().unwrap();
             match sub_matches.subcommand() {
                 ("add", Some(sub_matches2)) => {
-                    app::command_certs_add(
+                    app::command_cert_add(
                         &mut cfg,
                         sub_matches2.value_of("server_uuid").unwrap(),
                         sub_matches2.value_of("name").unwrap(),
@@ -308,7 +341,7 @@ fn main() {
                     .unwrap()
                 }
                 ("remove", Some(sub_matches2)) => {
-                    app::command_certs_remove(
+                    app::command_cert_remove(
                         &mut cfg,
                         sub_matches2.value_of("server_uuid").unwrap(),
                     )
@@ -317,6 +350,50 @@ fn main() {
                 _ => {
 
                 }
+            }
+        }
+        ("server", Some(sub_matches)) => {
+            if sub_matches.is_present("#") {
+
+            } else {
+                app::command_server_list(
+                    &cfg, 
+                    sub_matches.value_of("limit")
+                )
+                .unwrap()
+            }
+        }
+        ("record", Some(sub_matches)) => {
+            loop {
+                if let Some(s) = sub_matches.value_of("submit_uuid") {
+                    app::command_get_submit(
+                        &cfg,
+                        s
+                    )
+                    .unwrap();
+                    break;
+                }
+                if let Some(s) = sub_matches.value_of("server_uuid") {
+                    app::command_get_server_submit(
+                        &cfg,
+                        app::ServerHandleWrap::UUID(s),
+                        sub_matches.value_of("limit"),
+                        sub_matches.value_of("after"),
+                    )
+                    .unwrap();
+                    break;
+                }
+                if let Some(s) = sub_matches.value_of("key_id") {
+                    app::command_get_server_submit(
+                        &cfg,
+                        app::ServerHandleWrap::KeyID(s),
+                        sub_matches.value_of("limit"),
+                        sub_matches.value_of("after"),
+                    )
+                    .unwrap();
+                    break;
+                }
+                break;
             }
         }
         _ => {
