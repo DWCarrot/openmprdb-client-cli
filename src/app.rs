@@ -23,6 +23,7 @@ use ureq::Agent;
 use ureq::Proxy;
 use uuid::Uuid;
 use url::Url;
+use chrono::NaiveDateTime;
 
 
 use crate::pgp;
@@ -169,11 +170,20 @@ where
         let mut buf = Vec::with_capacity(256 * 1024);
         req.write_to(&mut buf)?;
 
-        println!("{} {} ({})\n\n{}", &method, &url, req.content_type(), String::from_utf8_lossy(buf.as_slice()));
+        #[cfg(debug_assertions)]
+        {
+            println!("{} {} ({})\n\n{}", &method, &url, req.content_type(), String::from_utf8_lossy(buf.as_slice()));
+        }
 
         request.set("Content-Type", req.content_type())
                 .send(buf.as_slice())
     } else {
+
+        #[cfg(debug_assertions)]
+        {
+            println!("{} {} ({})\n\n", &method, &url, req.content_type());
+        }
+
         request.call()
     }; 
         
@@ -314,7 +324,6 @@ pub fn command_recall<'a>(cfg: &mut config::Config, record_uuid: &'a str, commen
     )?
     .ok_or_else(|| AppError::MissingParameter { name: "config.fingerprint" })?;
     let api_url = AppError::unwrap_option(&cfg_data.api_url, "config.api_url" )?;
-    let server_uuid = AppError::unwrap_option(&cfg_data.server_uuid, "config.server_uuid")?.clone();
     let record_uuid = AppError::parse(record_uuid, "record_uuid")?;
     let comment = comment.to_string();
 
@@ -572,7 +581,19 @@ pub fn command_get_server_submit<'a>(cfg: &config::Config, handle: ServerHandleW
         None
     };
     let after = if let Some(s) = after {
-        None // TODO deserialize time
+        match NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
+            Ok(datetime) => {
+                let after = datetime.timestamp();
+                if after > 0 {
+                    Some(after as u64)
+                } else {
+                    None
+                }
+            }   
+            Err(e) => {
+                return Err(AppError::InvalidParameter{ name: "after", value: s });
+            }
+        }           
     } else {
         None
     };

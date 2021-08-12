@@ -236,6 +236,7 @@ fn main() {
                     Arg::with_name("after")
                         .long("after")
                         .takes_value(true)
+                        .help("ask to show submits after a specific time, in YYYY-MM-dd HH:mm:ss")
                 )
         );
     

@@ -1,5 +1,5 @@
 # openmprdb-client-cli (WIP)
-A simple cli-client example for [openMPRDB](https://github.com/NyaaCat/OpenMPRDB) using Rust
+A simple cli-client example for [OpenMPRDB](https://github.com/NyaaCat/OpenMPRDB) using Rust
 
 ### Build
 
