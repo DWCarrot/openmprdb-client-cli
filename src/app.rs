@@ -8,6 +8,8 @@ use std::env;
 use std::borrow::Borrow;
 use std::path::Path;
 use std::fs::File;
+use std::collections::HashMap;
+use std::ops::Range;
 
 
 use sequoia_openpgp::Cert;
@@ -626,6 +628,153 @@ pub fn command_get_server_submit<'a>(cfg: &config::Config, handle: ServerHandleW
             }
         }
     }
+
+    Ok(())
+}
+
+
+struct RecordTable<S, D> {
+    sp: char,
+    servers: Vec<S>,
+    data: HashMap<Uuid, Vec<Option<D>>>,
+}
+
+impl<S: Clone, D: Clone> RecordTable<S, D> {
+
+    pub fn new<I: IntoIterator<Item = S>>(servers: I, sp: char) -> Self {
+        RecordTable {
+            sp,
+            servers: servers.into_iter().collect(),
+            data: HashMap::new()
+        }
+    }
+
+    pub fn col_range(&self) -> Range<usize> {
+        0 .. self.servers.len()
+    }
+
+    pub fn get_server(&self, index: usize) -> S {
+        self.servers[index].clone()
+    }
+
+    pub fn insert(&mut self, uuid: Uuid, index: usize, value: D) {
+        let len = self.servers.len();
+        if index < len {
+            let mut line = self.data.entry(uuid).or_insert_with(|| vec![None; len]);
+            unsafe { *(line.get_unchecked_mut(index)) = Some(value); };
+        }
+    } 
+}
+
+impl<D: fmt::Display> WriteTo for RecordTable<(&Uuid, &config::ServerData), D> {
+    type Error = io::Error;
+
+    fn write_to<W: io::Write + Sync + Send>(&self, mut w: W) -> Result<(), Self::Error> {
+        let sp = self.sp;
+
+        write!(w, "")?;
+        for (_, server_data) in &self.servers {
+            let server_data = *server_data;
+            write!(w, "{}{}", sp, server_data.name.as_str())?;
+        }
+        writeln!(w, "")?;
+
+        write!(w, "")?;
+        for (uuid, _) in &self.servers {
+            let uuid = *uuid;
+            write!(w, "{}{}", sp, uuid.to_hyphenated_ref())?;
+        }
+        writeln!(w, "")?;
+
+        write!(w, "")?;
+        for (_, server_data) in &self.servers {
+            let server_data = *server_data;
+            write!(w, "{}{}", sp, server_data.trust)?;
+        }
+        writeln!(w, "")?;
+
+        for (k, v) in self.data.iter() {
+            write!(w, "{}", k.to_hyphenated_ref())?;
+            for p in v.iter() {
+                if let Some(p) = p {
+                    write!(w, "{}{}", sp, p)?;
+                } else {
+                    write!(w, "{}", sp)?;
+                }
+            }
+            writeln!(w, "")?;
+        }
+
+        w.flush()?;
+        Ok(())
+    }
+} 
+
+pub fn command_get_server_submit_auto<'a>(cfg: &config::Config, limit: Option<&'a str>, after: Option<&'a str>, output: &'a str) -> Result<(), AppError<'a, anyhow::Error>> {
+
+    let cfg_data = cfg.get_data();
+    let policy = StandardPolicy::new();
+    let api_url = AppError::unwrap_option(&cfg_data.api_url, "config.api_url" )?;
+    let limit = if let Some(s) = limit {
+        Some(AppError::parse(s, "limit")?)
+    } else {
+        None
+    };
+    let after = if let Some(s) = after {
+        match NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
+            Ok(datetime) => {
+                let after = datetime.timestamp();
+                if after > 0 {
+                    Some(after as u64)
+                } else {
+                    None
+                }
+            }   
+            Err(e) => {
+                return Err(AppError::InvalidParameter{ name: "after", value: s });
+            }
+        }           
+    } else {
+        None
+    };
+    
+    let mut cmgr = pgp::CertificationManager::new(
+        config::current_exe_path("servers.pgp").map_err(|e| AppError::Unexpected(e.into()))?
+        , &policy
+    )?;
+
+    fn transfer(r: &mut dyn io::Read) -> GeneralResult<api::SubmitContent> {
+        api::ReadFrom::read_from(r)
+    }
+
+    let mut table: RecordTable<_, f32> = RecordTable::new(cfg_data.servers.iter(), ',');
+
+    for i in table.col_range() {
+
+        let server_uuid = table.get_server(i).0;
+        let handle = api::ServerHandle::ServerUUID(server_uuid.clone());
+        let req = api::GetServerSubmitRequest::new(handle, limit, after);
+        match request::<api::GetServerSubmitRequest, api::GetServerSubmitResponse>(api_url, req) {
+            Ok(sc) => {
+                for s in &sc.submits {
+                    match pgp::verify(&cmgr, s.content.as_bytes(), transfer) {
+                        Ok(d) => {
+                            table.insert(d.player_uuid.clone(), i, d.points);
+                        }
+                        Err(e) => {
+                            eprintln!("{}", e);
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                
+            }
+        }
+    }
+
+    let mut ofile = File::create(output).map_err(|e| AppError::InvalidParameter{ name: "output", value: output})?;   
+    table.write_to(&mut ofile).map_err(|e| AppError::Unexpected(e.into()))?;
 
     Ok(())
 }

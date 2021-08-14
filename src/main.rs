@@ -226,9 +226,14 @@ fn main() {
                         .long("key-id")
                         .takes_value(true)
                 )
+                .arg(
+                    Arg::with_name("auto")
+                        .long("auto")
+                        .help("get record according to the servers in cert-config and merge them into a table")
+                )
                 .group(
                     ArgGroup::with_name("according")
-                        .args(&["submit_uuid", "server_uuid", "key_id"])
+                        .args(&["submit_uuid", "server_uuid", "key_id", "auto"])
                         .required(true)
                 )
                 .arg(
@@ -241,6 +246,14 @@ fn main() {
                         .long("after")
                         .takes_value(true)
                         .help("ask to show submits after a specific time, in YYYY-MM-dd HH:mm:ss")
+                )
+                .arg(
+                    Arg::with_name("output")
+                        .long("output")
+                        .short("o")
+                        .takes_value(true)
+                        .requires("auto")
+                        .help("output file")
                 )
         );
     
@@ -388,6 +401,16 @@ fn main() {
                         app::ServerHandleWrap::KeyID(s),
                         sub_matches.value_of("limit"),
                         sub_matches.value_of("after"),
+                    )
+                    .unwrap();
+                    break;
+                }
+                if sub_matches.is_present("auto") {
+                    app::command_get_server_submit_auto(
+                        &cfg,
+                        sub_matches.value_of("limit"),
+                        sub_matches.value_of("after"),
+                        sub_matches.value_of("output").unwrap()
                     )
                     .unwrap();
                     break;
