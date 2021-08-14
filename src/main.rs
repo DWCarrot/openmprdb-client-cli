@@ -23,7 +23,7 @@ fn main() {
         .about(env!("CARGO_PKG_DESCRIPTION"))
         .subcommand(
             SubCommand::with_name("config")
-                .help("config basic info; use [option]=<value> to set value & [option]=? to check value")
+                .about("Config basic settings; use [option]=<value> to set value & [option]=? to check value")
                 .arg(
                     Arg::with_name("cert_file")
                         .long("cert-file")
@@ -51,7 +51,7 @@ fn main() {
         )
         .subcommand(
             SubCommand::with_name("keyring")
-                .help("list keys in the specific certification file")
+                .about("List keys info in the specific secret key file of the server (bind to this client)")
                 .arg(
                     Arg::with_name("cert_file")
                         .long("cert-file")
@@ -67,7 +67,7 @@ fn main() {
         )
         .subcommand(
             SubCommand::with_name("register")
-                .help("register server in OpenMPRDB with specific certification file")
+                .about("Register the server with the secret key to remote OpenMPRDB ")
                 .arg(
                     Arg::with_name("cert_file")
                         .long("cert-file")
@@ -104,7 +104,7 @@ fn main() {
         )
         .subcommand(
             SubCommand::with_name("unregister")
-                .help("unregister the server")
+                .about("Unregister the server with the secret key from remote OpenMPRDB")
                 .arg(
                     Arg::with_name("comment")
                         .long("comment")
@@ -113,7 +113,7 @@ fn main() {
         )
         .subcommand(
             SubCommand::with_name("submit")
-                .help("submit a new record")
+                .about("Submit one record to remote OpenMPRDB")
                 .arg(
                     Arg::with_name("player_uuid")
                         .long("player-uuid")
@@ -136,7 +136,7 @@ fn main() {
         )
         .subcommand(
             SubCommand::with_name("recall")
-                .help("recall the submitted record")
+                .about("Recall the specific record from remote OpenMPRDB")
                 .arg(
                     Arg::with_name("record_uuid")
                         .long("record-uuid")
@@ -152,52 +152,56 @@ fn main() {
         )
         .subcommand(
             SubCommand::with_name("cert")
-                .help("add or remove public key certification of server registered in OpenMPRDB")
-                .subcommand(
-                    SubCommand::with_name("add")
-                        .arg(
-                            Arg::with_name("server_uuid")
-                                .long("server-uuid")
-                                .takes_value(true)
-                                .required(true)
-                                .help("uuid of the target server registered in OpenMPRDB to add")
-                        )
-                        .arg(
-                            Arg::with_name("name")
-                                .long("name")
-                                .takes_value(true)
-                                .required(true)
-                                .help("name of the target server")
-                        )
-                        .arg(
-                            Arg::with_name("key_id")
-                                .long("key-id")
-                                .takes_value(true)
-                                .required(true)
-                                .help("key-id of public key certification of the target server")
-                        )
-                        .arg(
-                            Arg::with_name("trust")
-                                .long("trust")
-                                .takes_value(true)
-                                .required(true)
-                                .help("trust level")
-                        ) 
+                .about("Management other server's public key registered in OpenMPRDB")
+                .arg(
+                    Arg::with_name("add")
+                        .long("add")
+                        .takes_value(false)
+                        .help("to add other server's public key")
                 )
-                .subcommand(
-                    SubCommand::with_name("remove")
-                        .arg(
-                            Arg::with_name("server_uuid")
-                                .long("server-uuid")
-                                .takes_value(true)
-                                .required(true)
-                                .help("uuid of the target server registered in OpenMPRDB to remove")
-                        )
+                .arg(
+                    Arg::with_name("remove")
+                        .long("remove")
+                        .takes_value(false)
+                        .help("to remove other server's public key")
+                )
+                .group(
+                    ArgGroup::with_name("add-remove")
+                        .args(&["add", "remove"])
+                        .required(true)
+                )
+                .arg(
+                    Arg::with_name("server_uuid")
+                        .long("server-uuid")
+                        .takes_value(true)
+                        .help("uuid of the target server registered in OpenMPRDB to add")
+                        .required(true)
+                )
+                .arg(
+                    Arg::with_name("name")
+                        .long("name")
+                        .takes_value(true)
+                        .help("name of the target server")
+                        .requires("add")
+                )
+                .arg(
+                    Arg::with_name("key_id")
+                        .long("key-id")
+                        .takes_value(true)
+                        .help("key-id of public key certification of the target server")
+                        .requires("add")
+                )
+                .arg(
+                    Arg::with_name("trust")
+                        .long("trust")
+                        .takes_value(true)
+                        .help("trust level")
+                        .requires("add")
                 )
         )
         .subcommand(
             SubCommand::with_name("server")
-                .help("get & show server data")
+                .about("Get & show servers registered in remote OpenMPRDB")
                 .arg(
                     Arg::with_name("limit")
                         .long("limit")
@@ -206,7 +210,7 @@ fn main() {
         )
         .subcommand(
             SubCommand::with_name("record")
-                .help("get & show record data")
+                .about("Acquire and verify record of records in remote OpenMPRDB with other server's public key")
                 .arg(
                     Arg::with_name("submit_uuid")
                         .long("submit-uuid")
@@ -330,27 +334,21 @@ fn main() {
             .unwrap();
         }
         ("cert", Some(sub_matches)) => {
-            match sub_matches.subcommand() {
-                ("add", Some(sub_matches2)) => {
-                    app::command_cert_add(
-                        &mut cfg,
-                        sub_matches2.value_of("server_uuid").unwrap(),
-                        sub_matches2.value_of("name").unwrap(),
-                        sub_matches2.value_of("key_id").unwrap(),
-                        sub_matches2.value_of("trust").unwrap(),
-                    )
-                    .unwrap()
-                }
-                ("remove", Some(sub_matches2)) => {
-                    app::command_cert_remove(
-                        &mut cfg,
-                        sub_matches2.value_of("server_uuid").unwrap(),
-                    )
-                    .unwrap()
-                }
-                _ => {
-
-                }
+            if sub_matches.is_present("add") {
+                app::command_cert_add(
+                    &mut cfg,
+                    sub_matches.value_of("server_uuid").unwrap(),
+                    sub_matches.value_of("name").unwrap(),
+                    sub_matches.value_of("key_id").unwrap(),
+                    sub_matches.value_of("trust").unwrap(),
+                )
+                .unwrap()
+            } else if sub_matches.is_present("remove") {
+                app::command_cert_remove(
+                    &mut cfg,
+                    sub_matches.value_of("server_uuid").unwrap(),
+                )
+                .unwrap()
             }
         }
         ("server", Some(sub_matches)) => {

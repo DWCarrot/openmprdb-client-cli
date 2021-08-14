@@ -6,7 +6,6 @@ use std::str::FromStr;
 
 use serde::Serialize;
 use serde::Deserialize;
-use serde::Deserializer;
 use sequoia_openpgp::Cert;
 use sequoia_openpgp::KeyID;
 use sequoia_openpgp::crypto::KeyPair;

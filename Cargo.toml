@@ -1,6 +1,6 @@
 [package]
 name = "openmprdbc-cli"
-version = "0.3.1-beta"
+version = "0.3.2-beta"
 authors = ["RDCarrot <yyt226univ2017@yahoo.com>"]
 edition = "2018"
 description = "A simple cli-client example for [OpenMPRDB](https://github.com/NyaaCat/OpenMPRDB)" 
