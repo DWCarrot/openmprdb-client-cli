@@ -173,13 +173,33 @@ pub fn load_cert<P: AsRef<Path>>(path: P) -> GeneralResult<Cert> {
 }
 
 pub fn load_keyring<P: AsRef<Path>>(path: P) -> GeneralResult<Vec<Cert>> {
-    let mut certs = vec![];
+    let mut certs = Vec::new();
 
     for maybe_cert in CertParser::from_file(path)? {
         certs.push(maybe_cert?);
     }
     
     Ok(certs)
+}
+
+pub fn read_keyring<R: Read + Sync + Send>(reader: R) -> GeneralResult<Vec<Cert>> {
+    let mut certs = Vec::new();
+
+    for maybe_cert in CertParser::from_reader(reader)? {
+        certs.push(maybe_cert?);
+    }
+    
+    Ok(certs)
+}
+
+pub fn iter_cert<'a>(cert: &'a Cert, policy: &'a dyn Policy, timestamp: impl Into<Option<SystemTime>>) -> impl Iterator<Item = KeyID> + 'a {
+    cert.keys()
+        .with_policy(policy, timestamp)
+        .alive()
+        .revoked(false)
+        .for_signing()
+        .supported()
+        .map(|ka| ka.keyid())
 }
 
 pub fn load_cert_from_keyring<P: AsRef<Path>>(path: P, keyhandle: Option<&KeyHandle>) -> GeneralResult<Option<Cert>> {
@@ -269,7 +289,7 @@ fn get_signing_keys<'a, I: IntoIterator<Item = &'a Cert>>(certs: I, p: &dyn Poli
 
 
 
-pub fn check_key(cert: &Cert, p: &dyn Policy, timestamp: Option<SystemTime>, key_id: &KeyID) -> GeneralResult<bool> {
+pub fn check_key(cert: &Cert, p: &dyn Policy, timestamp: Option<SystemTime>, key_id: &KeyID) -> bool {
     for key in cert.keys()
             .with_policy(p, timestamp)
             .alive()
@@ -279,10 +299,27 @@ pub fn check_key(cert: &Cert, p: &dyn Policy, timestamp: Option<SystemTime>, key
             .map(|ka| ka.key())
             .filter(|key| key.keyid() == *key_id)
     {
-        return Ok(true);
+        return true;
     }
 
-    Ok(false)
+    false
+}
+
+pub fn check_secret_key(cert: &Cert, p: &dyn Policy, timestamp: Option<SystemTime>, key_id: &KeyID) -> bool {
+    for key in cert.keys()
+            .with_policy(p, timestamp)
+            .alive()
+            .revoked(false)
+            .secret()
+            .for_signing()
+            .supported()
+            .map(|ka| ka.key())
+            .filter(|key| key.keyid() == *key_id)
+    {
+        return true;
+    }
+
+    false
 }
 
 
@@ -363,18 +400,109 @@ pub fn export_publickey_raw<W: Write + Sync + Send>(cert: &Cert, w: &mut W) -> G
 
 
 
-pub fn verify<'a, R, F, T>(cmgr: &'a CertificationManager, signed: R, f: F) -> GeneralResult<T> 
+pub fn verify<'a, R, T, F, V>(cert: &'a Cert, key_id: &'a KeyID, policy: &dyn Policy, timestamp: T, signed: R, f: F) -> GeneralResult<V> 
 where
     R: 'a + Read + Sync + Send,
-    F: FnOnce(&mut dyn Read) -> GeneralResult<T>,
+    T: Into<Option<SystemTime>>,
+    F: FnOnce(&mut dyn Read) -> GeneralResult<V>,
 {
-    let h = VerifyHelper {
-        cmgr,
+    let timestamp = timestamp.into();
+    let mut fingerprint = None;
+
+    for key in cert.keys()
+        .with_policy(policy, timestamp)
+        .alive()
+        .revoked(false)
+        .for_signing()
+        .supported()
+        .map(|ka| ka.key())
+        .filter(|key| key.keyid() == *key_id) {
+        fingerprint = Some(key.fingerprint());
+    }
+
+    let fingerprint = fingerprint.ok_or_else(|| anyhow::anyhow!("invalid keyid for cert: {}", key_id))?;
+
+    let h = SpecificVerifyHelper {
+        cert,
+        key_id,
+        fingerprint: &fingerprint
     };
-    let mut v = VerifierBuilder::from_reader(signed)?.with_policy(cmgr.policy, SystemTime::now(), h)?;
+
+    let mut v = VerifierBuilder::from_reader(signed)?.with_policy(policy, timestamp, h)?;
     let value = f(&mut v)?;
     Ok(value)
-} 
+}
+
+
+struct SpecificVerifyHelper<'a> {
+    cert: &'a Cert,
+    key_id: &'a KeyID,
+    fingerprint: &'a Fingerprint,
+}
+
+impl<'a> VerificationHelper for SpecificVerifyHelper<'a> {
+
+    fn inspect(&mut self, pp: &PacketParser) -> GeneralResult<()> {
+        // Do nothing.
+        let _ = pp;
+        Ok(())
+    }
+
+    fn get_certs(&mut self, ids: &[KeyHandle]) -> GeneralResult<Vec<Cert>> {
+        let mut certs = Vec::new();
+        for id in ids {
+            match id {
+                KeyHandle::KeyID(key_id) => {
+                    if *key_id == *self.key_id {
+                        certs.push(self.cert.clone())
+                    }
+                }
+                KeyHandle::Fingerprint(fingerprint) => {
+                    if *fingerprint == *self.fingerprint {
+                        certs.push(self.cert.clone())
+                    }
+                }
+            }
+        }
+        Ok(certs)
+    }
+
+    fn check(&mut self, structure: MessageStructure) -> GeneralResult<()> {
+
+        // In this function, we implement our signature verification
+        // policy.
+ 
+        let mut good = false;
+        for (i, layer) in structure.into_iter().enumerate() {
+            match (i, layer) {
+                // First, we are interested in signatures over the
+                // data, i.e. level 0 signatures.
+                (0, MessageLayer::SignatureGroup { results }) => {
+                    // Finally, given a VerificationResult, which only says
+                    // whether the signature checks out mathematically, we apply
+                    // our policy.
+                    match results.into_iter().next() {
+                        Some(Ok(_)) =>
+                            good = true,
+                        Some(Err(e)) =>
+                            return Err(sequoia_openpgp::Error::from(e).into()),
+                        None =>
+                            return Err(anyhow!("No signature")),
+                    }
+                },
+                _ => return Err(anyhow!("Unexpected message structure")),
+            }
+        }
+ 
+        if good {
+            Ok(()) // Good signature.
+        } else {
+            Err(anyhow!("Signature verification failed"))
+        }
+    }
+}
+
+
 
 struct VerifyHelper<'a> {
     cmgr: &'a CertificationManager<'a>,

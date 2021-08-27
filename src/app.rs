@@ -215,7 +215,7 @@ where
 
 //////////////////////////////////////////////////////
 
-pub fn command_keyring(cfg: &mut config::Config) -> Result<(), AppError<'_, anyhow::Error>> {
+pub fn command_keyring(cfg: &mut config::client::ClientConfig) -> Result<(), AppError<'_, anyhow::Error>> {
     let cfg_data = cfg.get_data();
     let policy = StandardPolicy::new();
     let certs = pgp::load_keyring(AppError::unwrap_option(&cfg_data.cert_file, "config.cert_file")?)?;
@@ -226,15 +226,12 @@ pub fn command_keyring(cfg: &mut config::Config) -> Result<(), AppError<'_, anyh
     Ok(())
 }
 
-pub fn command_register<'a>(cfg: &mut config::Config, server_name: &'a str) -> Result<(), AppError<'a, anyhow::Error>> {
+pub fn command_register<'a>(cfg: &mut config::client::ClientConfig, server_name: &'a str) -> Result<(), AppError<'a, anyhow::Error>> {
     let cfg_data = cfg.get_data();
     let policy = StandardPolicy::new();
     let key_id = AppError::unwrap_option(&cfg_data.key_id, "config.key_id")?;
-    let cert = pgp::load_cert_from_keyring(
-        AppError::unwrap_option(&cfg_data.cert_file, "config.cert_file")?,
-        Some(&KeyHandle::KeyID(key_id.clone()))
-    )?
-    .ok_or_else(|| AppError::MissingParameter { name: "config.fingerprint" })?;
+    let cert = cfg_data.get_cert()
+        .ok_or_else(|| AppError::MissingParameter { name: "config.cert_file" })?;
     let api_url = AppError::unwrap_option(&cfg_data.api_url, "config.api_url" )?;
 
     let keypair = pgp::get_signing_key(&cert, &policy, Some(SystemTime::now()), key_id, &pgp::TTYPasswordProvider)?;
@@ -252,15 +249,12 @@ pub fn command_register<'a>(cfg: &mut config::Config, server_name: &'a str) -> R
     Ok(())
 }
 
-pub fn command_unregister<'a>(cfg: &mut config::Config, comment: &'a str) -> Result<(), AppError<'a, anyhow::Error>> {
+pub fn command_unregister<'a>(cfg: &mut config::client::ClientConfig, comment: &'a str) -> Result<(), AppError<'a, anyhow::Error>> {
     let cfg_data = cfg.get_data();
     let policy = StandardPolicy::new();
     let key_id = AppError::unwrap_option(&cfg_data.key_id, "config.key_id")?;
-    let cert = pgp::load_cert_from_keyring(
-        AppError::unwrap_option(&cfg_data.cert_file, "config.cert_file")?,
-        Some(&KeyHandle::KeyID(key_id.clone()))
-    )?
-    .ok_or_else(|| AppError::MissingParameter { name: "config.fingerprint" })?;    
+    let cert = cfg_data.get_cert()
+        .ok_or_else(|| AppError::MissingParameter { name: "config.cert_file" })?;   
     let api_url = AppError::unwrap_option(&cfg_data.api_url, "config.api_url" )?;
     let server_uuid = AppError::unwrap_option(&cfg_data.server_uuid, "config.server_uuid" )?.clone();
     let comment = comment.to_string();
@@ -283,15 +277,12 @@ pub fn command_unregister<'a>(cfg: &mut config::Config, comment: &'a str) -> Res
 }
 
 
-pub fn command_submit<'a>(cfg: &mut config::Config, player_uuid: &'a str, points: &'a str, comment: &'a str) -> Result<(), AppError<'a, anyhow::Error>> {
+pub fn command_submit<'a>(cfg: &mut config::client::ClientConfig, rcfg: &mut config::records::RecordConfig, player_uuid: &'a str, points: &'a str, comment: &'a str) -> Result<(), AppError<'a, anyhow::Error>> {
     let cfg_data = cfg.get_data();
     let policy = StandardPolicy::new();
     let key_id = AppError::unwrap_option(&cfg_data.key_id, "config.key_id")?;
-    let cert = pgp::load_cert_from_keyring(
-        AppError::unwrap_option(&cfg_data.cert_file, "config.cert_file")?,
-        Some(&KeyHandle::KeyID(key_id.clone()))
-    )?
-    .ok_or_else(|| AppError::MissingParameter { name: "config.fingerprint" })?;
+    let cert = cfg_data.get_cert()
+        .ok_or_else(|| AppError::MissingParameter { name: "config.cert_file" })?;
     let api_url = AppError::unwrap_option(&cfg_data.api_url, "config.api_url" )?;
     let server_uuid = AppError::unwrap_option(&cfg_data.server_uuid, "config.server_uuid" )?.clone();
     let player_uuid = AppError::parse(player_uuid, "player_uuid")?;
@@ -316,15 +307,12 @@ pub fn command_submit<'a>(cfg: &mut config::Config, player_uuid: &'a str, points
     Ok(())
 }
 
-pub fn command_recall<'a>(cfg: &mut config::Config, record_uuid: &'a str, comment: &'a str) -> Result<(), AppError<'a, anyhow::Error>> {
+pub fn command_recall<'a>(cfg: &mut config::client::ClientConfig, record_uuid: &'a str, comment: &'a str) -> Result<(), AppError<'a, anyhow::Error>> {
     let cfg_data = cfg.get_data();
     let policy = StandardPolicy::new();
     let key_id = AppError::unwrap_option(&cfg_data.key_id, "config.key_id")?;
-    let cert = pgp::load_cert_from_keyring(
-        AppError::unwrap_option(&cfg_data.cert_file, "config.cert_file")?,
-        Some(&KeyHandle::KeyID(key_id.clone()))
-    )?
-    .ok_or_else(|| AppError::MissingParameter { name: "config.fingerprint" })?;
+    let cert = cfg_data.get_cert()
+        .ok_or_else(|| AppError::MissingParameter { name: "config.cert_file" })?;
     let api_url = AppError::unwrap_option(&cfg_data.api_url, "config.api_url" )?;
     let record_uuid = AppError::parse(record_uuid, "record_uuid")?;
     let comment = comment.to_string();
@@ -346,7 +334,7 @@ pub fn command_recall<'a>(cfg: &mut config::Config, record_uuid: &'a str, commen
 }
 
 
-pub fn command_cert_add<'a>(cfg: &mut config::Config, server_uuid: &'a str, name: &'a str, key_id: &'a str, trust: &'a str) -> Result<(), AppError<'a, anyhow::Error>> {
+pub fn command_cert_add<'a>(cfg: &mut config::client::ClientConfig, server_uuid: &'a str, name: &'a str, key_id: &'a str, trust: &'a str) -> Result<(), AppError<'a, anyhow::Error>> {
 
     let server_uuid: Uuid = AppError::parse(server_uuid, "server_uuid")?;
     let key_id: KeyID = AppError::parse(key_id, "key_id")?;
@@ -385,7 +373,7 @@ pub fn command_cert_add<'a>(cfg: &mut config::Config, server_uuid: &'a str, name
     Ok(())
 }
 
-// pub fn cert_add<'a, P, C>(cfg: &mut config::Config, server_uuid: Uuid, name: String, key_id: KeyID, trust: u32, cert: C, p: &dyn Policy, folder: P) -> GeneralResult<bool> 
+// pub fn cert_add<'a, P, C>(cfg: &mut config::client::ClientConfig, server_uuid: Uuid, name: String, key_id: KeyID, trust: u32, cert: C, p: &dyn Policy, folder: P) -> GeneralResult<bool> 
 // where
 //     P: AsRef<Path>,
 //     C: FnOnce() -> GeneralResult<Cert>
@@ -429,7 +417,7 @@ pub fn command_cert_add<'a>(cfg: &mut config::Config, server_uuid: &'a str, name
 // }
 
 
-pub fn command_cert_remove<'a>(cfg: &mut config::Config, server_uuid: &'a str) -> Result<(), AppError<'a, anyhow::Error>> {
+pub fn command_cert_remove<'a>(cfg: &mut config::client::ClientConfig, server_uuid: &'a str) -> Result<(), AppError<'a, anyhow::Error>> {
     let server_uuid: Uuid = AppError::parse(server_uuid, "server_uuid")?;
     let policy = StandardPolicy::new();
     let mut cmgr = pgp::CertificationManager::new(
@@ -452,7 +440,7 @@ pub fn command_cert_remove<'a>(cfg: &mut config::Config, server_uuid: &'a str) -
     Ok(())
 }
 
-// pub fn cert_remove<'a, P: AsRef<Path>>(cfg: &mut config::Config, server_uuid: &Uuid, folder: P) -> GeneralResult<bool> {
+// pub fn cert_remove<'a, P: AsRef<Path>>(cfg: &mut config::client::ClientConfig, server_uuid: &Uuid, folder: P) -> GeneralResult<bool> {
 
 //     let remove = match cfg.get_data_mut().servers.remove(server_uuid) {
 //         Some(data) => {
@@ -472,7 +460,7 @@ pub fn command_cert_remove<'a>(cfg: &mut config::Config, server_uuid: &'a str) -
 // }
 
 
-pub fn command_server_list<'a>(cfg: &config::Config, limit: Option<&'a str>) -> Result<(), AppError<'a, anyhow::Error>> {
+pub fn command_server_list<'a>(cfg: &config::client::ClientConfig, limit: Option<&'a str>) -> Result<(), AppError<'a, anyhow::Error>> {
     let cfg_data = cfg.get_data();
     let api_url = AppError::unwrap_option(&cfg_data.api_url, "config.api_url" )?;
     
@@ -508,7 +496,7 @@ pub fn command_server_list<'a>(cfg: &config::Config, limit: Option<&'a str>) -> 
 }
 
 
-pub fn command_get_submit<'a>(cfg: &config::Config, record_uuid: &'a str) -> Result<(), AppError<'a, anyhow::Error>> {
+pub fn command_get_submit<'a>(cfg: &config::client::ClientConfig, record_uuid: &'a str) -> Result<(), AppError<'a, anyhow::Error>> {
 
     let cfg_data = cfg.get_data();
     let policy = StandardPolicy::new();
@@ -568,7 +556,7 @@ pub enum ServerHandleWrap<'a> {
     KeyID(&'a str),
 }
 
-pub fn command_get_server_submit<'a>(cfg: &config::Config, handle: ServerHandleWrap<'a>, limit: Option<&'a str>, after: Option<&'a str>) -> Result<(), AppError<'a, anyhow::Error>> {
+pub fn command_get_server_submit<'a>(cfg: &config::client::ClientConfig, handle: ServerHandleWrap<'a>, limit: Option<&'a str>, after: Option<&'a str>) -> Result<(), AppError<'a, anyhow::Error>> {
 
     let cfg_data = cfg.get_data();
     let policy = StandardPolicy::new();
@@ -710,7 +698,7 @@ impl<D: fmt::Display> WriteTo for RecordTable<(&Uuid, &config::ServerData), D> {
     }
 } 
 
-pub fn command_get_server_submit_auto<'a>(cfg: &config::Config, limit: Option<&'a str>, after: Option<&'a str>, output: &'a str) -> Result<(), AppError<'a, anyhow::Error>> {
+pub fn command_get_server_submit_auto<'a>(cfg: &config::client::ClientConfig, limit: Option<&'a str>, after: Option<&'a str>, output: &'a str) -> Result<(), AppError<'a, anyhow::Error>> {
 
     let cfg_data = cfg.get_data();
     let policy = StandardPolicy::new();

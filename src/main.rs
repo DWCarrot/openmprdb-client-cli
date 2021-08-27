@@ -1,8 +1,7 @@
 mod pgp;
-mod api;
-mod app;
-mod http;
+mod api_v1;
 mod config;
+mod command;
 
 use std::fmt;
 use std::path::Path;
@@ -14,6 +13,10 @@ use clap::ArgGroup;
 use uuid::Uuid;
 use sequoia_openpgp::KeyID;
 use sequoia_openpgp::Fingerprint;
+
+use config::client::ClientConfig;
+use config::servers::ServersConfig;
+use config::records::RecordConfig;
 
 fn main() {
 
@@ -49,22 +52,22 @@ fn main() {
                         .help("set openmprdb api url")   
                 )
         )
-        .subcommand(
-            SubCommand::with_name("keyring")
-                .about("List keys info in the specific secret key file of the server (bind to this client)")
-                .arg(
-                    Arg::with_name("cert_file")
-                        .long("cert-file")
-                        .takes_value(true)
-                        .help("set certification file of TPK and TSK data structures")
-                )
-                .arg(
-                    Arg::with_name("key_id")
-                        .long("key-id")
-                        .takes_value(true)
-                        .help("specific key in the certification file")
-                )
-        )
+        // .subcommand(
+        //     SubCommand::with_name("keyring")
+        //         .about("List keys info in the specific secret key file of the server (bind to this client)")
+        //         .arg(
+        //             Arg::with_name("cert_file")
+        //                 .long("cert-file")
+        //                 .takes_value(true)
+        //                 .help("set certification file of TPK and TSK data structures")
+        //         )
+        //         .arg(
+        //             Arg::with_name("key_id")
+        //                 .long("key-id")
+        //                 .takes_value(true)
+        //                 .help("specific key in the certification file")
+        //         )
+        // )
         .subcommand(
             SubCommand::with_name("register")
                 .about("Register the server with the secret key to remote OpenMPRDB ")
@@ -81,12 +84,12 @@ fn main() {
                         .takes_value(true)
                         .help("specific key in the certification file")
                 )
-                .arg(
-                    Arg::with_name("fingerprint")
-                        .long("fingerprint")
-                        .takes_value(true)
-                        .help("specific fingerprint the certification file")
-                )
+                // .arg(
+                //     Arg::with_name("fingerprint")
+                //         .long("fingerprint")
+                //         .takes_value(true)
+                //         .help("specific fingerprint the certification file")
+                // )
                 .arg(
                     Arg::with_name("api_url")
                         .long("api-url")
@@ -133,6 +136,10 @@ fn main() {
                         .long("comment")
                         .takes_value(true)
                 )
+                .arg(
+                    Arg::with_name("force")
+                        .long("force")
+                )
         )
         .subcommand(
             SubCommand::with_name("recall")
@@ -149,6 +156,10 @@ fn main() {
                         .long("comment")
                         .takes_value(true)
                 )
+                .arg(
+                    Arg::with_name("force")
+                        .long("force")
+                )
         )
         .subcommand(
             SubCommand::with_name("cert")
@@ -157,7 +168,7 @@ fn main() {
                     Arg::with_name("add")
                         .long("add")
                         .takes_value(false)
-                        .help("to add other server's public key")
+                        .help("to add other server's public key, input from console")
                 )
                 .arg(
                     Arg::with_name("remove")
@@ -226,20 +237,20 @@ fn main() {
                         .long("key-id")
                         .takes_value(true)
                 )
-                .arg(
-                    Arg::with_name("auto")
-                        .long("auto")
-                        .help("get record according to the servers in cert-config and merge them into a table")
-                )
+                // .arg(
+                //     Arg::with_name("auto")
+                //         .long("auto")
+                //         .help("get record according to the servers in cert-config and merge them into a table")
+                // )
                 .group(
                     ArgGroup::with_name("according")
-                        .args(&["submit_uuid", "server_uuid", "key_id", "auto"])
+                        .args(&["submit_uuid", "server_uuid", "key_id", /* "auto" */])
                         .required(true)
                 )
                 .arg(
                     Arg::with_name("limit")
                         .long("limit")
-                        .takes_value(true)
+                        .takes_value(true) 
                 )
                 .arg(
                     Arg::with_name("after")
@@ -247,23 +258,47 @@ fn main() {
                         .takes_value(true)
                         .help("ask to show submits after a specific time, in YYYY-MM-dd HH:mm:ss")
                 )
+                // .arg(
+                //     Arg::with_name("output")
+                //         .long("output")
+                //         .short("o")
+                //         .takes_value(true)
+                //         .requires("auto")
+                //         .help("output file")
+                // )
+        )
+        .subcommand(
+            SubCommand::with_name("import")
+                .about("Submit mutiple records import from banlist (banned-players.json)")
                 .arg(
-                    Arg::with_name("output")
-                        .long("output")
-                        .short("o")
+                    Arg::with_name("banlist")
                         .takes_value(true)
-                        .requires("auto")
-                        .help("output file")
+                        .required(true)
+                        .help("banlist file (banned-players.json)") 
+                )
+                .arg(
+                    Arg::with_name("interval")
+                        .long("interval")
+                        .takes_value(true)
+                        .help("requset interval in milliseconds")
                 )
         );
     
 
 
     let matches = app.get_matches();
-    let mut cfg = config::Config::new(config::current_exe_path("config").unwrap()).unwrap();
+    
+    let password = pgp::TTYPasswordProvider;
 
     match matches.subcommand() {
         ("config", Some(sub_matches)) => {
+
+            let policy = config::build_policy();
+            let mut cfg = ClientConfig::new(
+                config::current_exe_path("config").unwrap(), 
+                policy.as_ref(),
+            )
+            .unwrap();
             
             if let Some(s) = sub_matches.value_of("cert_file") {
                 if s != "?" {
@@ -290,19 +325,38 @@ fn main() {
                 println!("server_uuid = {}", OptionalUUIDDisplay(&cfg.get_data().server_uuid))
             }
         },
-        ("keyring", Some(sub_matches)) => {
-            if let Some(s) = sub_matches.value_of("cert_file") {
-                cfg.set_cert_file(s);
-                cfg.get_data_mut().key_id = None;
-                println!("update config: cert_file = {}", OptionalPathDisplay(&cfg.get_data().cert_file))
-            }
-            if let Some(s) = sub_matches.value_of("key_id") {
-                cfg.set_key_id(s);
-                println!("update config: key_id = {}", OptionalKeyIDDisplay(&cfg.get_data().key_id))
-            }
-            app::command_keyring(&mut cfg).unwrap();
-        },
+        // ("keyring", Some(sub_matches)) => {
+
+            // let policy = config::build_policy();
+            // let mut cfg = ClientConfig::new(
+            //     config::current_exe_path("config").unwrap(), 
+            //     policy.as_ref(),
+            //     &pgp::TTYPasswordProvider
+            // )
+            // .unwrap();
+
+            // if let Some(s) = sub_matches.value_of("cert_file") {
+            //     cfg.set_cert_file(s);
+            //     cfg.get_data_mut().key_id = None;
+            //     println!("update config: cert_file = {}", OptionalPathDisplay(&cfg.get_data().cert_file))
+            // }
+            // if let Some(s) = sub_matches.value_of("key_id") {
+            //     cfg.set_key_id(s);
+            //     println!("update config: key_id = {}", OptionalKeyIDDisplay(&cfg.get_data().key_id))
+            // }
+            
+            // // TODO
+        // },
         ("register", Some(sub_matches)) => {
+
+            let policy = config::build_policy();
+            let mut cfg = ClientConfig::new(
+                config::current_exe_path("config").unwrap(), 
+                policy.as_ref(),
+            )
+            .unwrap();
+            let httpc = command::http::Client::new().unwrap();
+
             if let Some(s) = sub_matches.value_of("cert_file") {
                 cfg.set_cert_file(s);
                 cfg.get_data_mut().key_id = None;
@@ -316,108 +370,223 @@ fn main() {
                 cfg.set_api_url(s);
                 println!("update config: api_url = {}", OptionalStrDisplay(&cfg.get_data().api_url))
             }
-            app::command_register(
+            command::command_register(
                 &mut cfg, 
+                &httpc,
+                &password,
                 sub_matches.value_of("server_name").unwrap(),
             )
-            .unwrap()
+            .unwrap_or_else(handle_err);
         },
         ("unregister", Some(sub_matches)) => {
-            app::command_unregister(
-                &mut cfg, 
-                sub_matches.value_of("comment").unwrap_or_default()
+
+            let policy = config::build_policy();
+            let mut cfg = ClientConfig::new(
+                config::current_exe_path("config").unwrap(), 
+                policy.as_ref(),
             )
             .unwrap();
+            let httpc = command::http::Client::new().unwrap();
+
+            command::command_unregister(
+                &mut cfg,
+                &httpc,
+                &password,
+                sub_matches.value_of("comment").unwrap_or_default()
+            )
+            .unwrap_or_else(handle_err);
         },
         ("submit", Some(sub_matches)) => {
-            app::command_submit(
-                &mut cfg, 
+
+            let policy = config::build_policy();
+            let mut cfg = ClientConfig::new(
+                config::current_exe_path("config").unwrap(), 
+                policy.as_ref(),
+            )
+            .unwrap();
+            let mut records = RecordConfig::new(
+                config::current_exe_path(format!("record-{}", cfg.get_data().server_uuid.unwrap())).unwrap()
+            )
+            .unwrap();
+            let httpc = command::http::Client::new().unwrap();
+
+
+            command::command_submit(
+                &mut cfg,
+                &mut records,
+                &httpc,
+                &password,
                 sub_matches.value_of("player_uuid").unwrap(),
                 sub_matches.value_of("points").unwrap(),
-                sub_matches.value_of("comment").unwrap_or_default()
+                sub_matches.value_of("comment").unwrap_or_default(),
+                sub_matches.is_present("force")
             )
-            .unwrap();
+            .unwrap_or_else(handle_err);
         },
         ("recall", Some(sub_matches)) => {
-            app::command_recall(
-                &mut cfg, 
-                sub_matches.value_of("record_uuid").unwrap(),
-                sub_matches.value_of("comment").unwrap_or_default()
+
+            let policy = config::build_policy();
+            let mut cfg = ClientConfig::new(
+                config::current_exe_path("config").unwrap(), 
+                policy.as_ref(),
             )
             .unwrap();
+            let mut records = RecordConfig::new(
+                config::current_exe_path(format!("record-{}", cfg.get_data().server_uuid.unwrap())).unwrap()
+            )
+            .unwrap();
+            let httpc = command::http::Client::new().unwrap();
+
+            command::command_recall(
+                &mut cfg,
+                &mut records,
+                &httpc,
+                &password,
+                sub_matches.value_of("record_uuid").unwrap(),
+                sub_matches.value_of("comment").unwrap_or_default(),
+                sub_matches.is_present("force")
+            )
+            .unwrap_or_else(handle_err);
         }
         ("cert", Some(sub_matches)) => {
+
+            let policy = config::build_policy();
+            let mut servers = ServersConfig::new(
+                config::current_exe_path("servers").unwrap(), 
+                config::current_exe_path("serverscert.pgp").unwrap(),
+                policy.as_ref()
+            )
+            .unwrap();
+
             if sub_matches.is_present("add") {
-                app::command_cert_add(
-                    &mut cfg,
+                command::command_cert_add(
+                    &mut servers,
                     sub_matches.value_of("server_uuid").unwrap(),
                     sub_matches.value_of("name").unwrap(),
                     sub_matches.value_of("key_id").unwrap(),
                     sub_matches.value_of("trust").unwrap(),
                 )
-                .unwrap()
+                .unwrap_or_else(handle_err);
             } else if sub_matches.is_present("remove") {
-                app::command_cert_remove(
-                    &mut cfg,
+                command::command_cert_remove(
+                    &mut servers,
                     sub_matches.value_of("server_uuid").unwrap(),
                 )
-                .unwrap()
+                .unwrap_or_else(handle_err);
             }
         }
         ("server", Some(sub_matches)) => {
+
+            let policy = config::build_policy();
+            let mut cfg = ClientConfig::new(
+                config::current_exe_path("config").unwrap(), 
+                policy.as_ref(),
+            )
+            .unwrap();
+            let httpc = command::http::Client::new().unwrap();
+
             if sub_matches.is_present("#") {
 
             } else {
-                app::command_server_list(
-                    &cfg, 
+                command::command_server_list(
+                    &cfg,
+                    &httpc,
                     sub_matches.value_of("limit")
                 )
-                .unwrap()
+                .unwrap_or_else(handle_err);
             }
         }
         ("record", Some(sub_matches)) => {
+
+            let policy = config::build_policy();
+            let mut cfg = ClientConfig::new(
+                config::current_exe_path("config").unwrap(), 
+                policy.as_ref(),
+            )
+            .unwrap();
+            let mut servers = ServersConfig::new(
+                config::current_exe_path("servers").unwrap(), 
+                config::current_exe_path("serverscert.pgp").unwrap(),
+                policy.as_ref()
+            )
+            .unwrap();
+            let httpc = command::http::Client::new().unwrap();
+
             loop {
                 if let Some(s) = sub_matches.value_of("submit_uuid") {
-                    app::command_get_submit(
+                    command::command_get_submit(
                         &cfg,
+                        &servers,
+                        &httpc,
                         s
                     )
-                    .unwrap();
+                    .unwrap_or_else(handle_err);
                     break;
                 }
                 if let Some(s) = sub_matches.value_of("server_uuid") {
-                    app::command_get_server_submit(
+                    command::command_get_server_submit(
                         &cfg,
-                        app::ServerHandleWrap::UUID(s),
+                        &servers,
+                        &httpc,
+                        command::ServerHandleWrap::UUID(s),
                         sub_matches.value_of("limit"),
                         sub_matches.value_of("after"),
                     )
-                    .unwrap();
+                    .unwrap_or_else(handle_err);
                     break;
                 }
                 if let Some(s) = sub_matches.value_of("key_id") {
-                    app::command_get_server_submit(
+                    command::command_get_server_submit(
                         &cfg,
-                        app::ServerHandleWrap::KeyID(s),
+                        &servers,
+                        &httpc,
+                        command::ServerHandleWrap::KeyID(s),
                         sub_matches.value_of("limit"),
                         sub_matches.value_of("after"),
                     )
-                    .unwrap();
+                    .unwrap_or_else(handle_err);
                     break;
                 }
-                if sub_matches.is_present("auto") {
-                    app::command_get_server_submit_auto(
-                        &cfg,
-                        sub_matches.value_of("limit"),
-                        sub_matches.value_of("after"),
-                        sub_matches.value_of("output").unwrap()
-                    )
-                    .unwrap();
-                    break;
-                }
-                break;
+                // if sub_matches.is_present("auto") {
+                //     app::command_get_server_submit_auto(
+                //         &cfg,
+                //         sub_matches.value_of("limit"),
+                //         sub_matches.value_of("after"),
+                //         sub_matches.value_of("output").unwrap()
+                //     )
+                //     .unwrap();
+                //     break;
+                // }
+                // break;
             }
-        }
+        },
+        ("import", Some(sub_matches)) => {
+
+            let policy = config::build_policy();
+            let mut cfg = ClientConfig::new(
+                config::current_exe_path("config").unwrap(), 
+                policy.as_ref(),
+            )
+            .unwrap();
+            let mut records = RecordConfig::new(
+                config::current_exe_path(format!("record-{}", cfg.get_data().server_uuid.unwrap())).unwrap()
+            )
+            .unwrap();
+            let httpc = command::http::Client::new().unwrap();
+
+            let rules = command::banlist::BasicGeneratePoints;
+
+            command::command_import(
+                &mut cfg, 
+                &mut records, 
+                &httpc, 
+                &password, 
+                sub_matches.value_of("banlist").unwrap(),
+                sub_matches.value_of("interval"),
+                &rules
+            )
+            .unwrap_or_else(handle_err);
+        },
         _ => {
             
         },
@@ -488,5 +657,23 @@ impl<'a, S: AsRef<str>> fmt::Display for OptionalStrDisplay<'a, S> {
             f.write_str(url.as_ref())?;
         }
         Ok(())
+    }
+}
+
+
+fn handle_err(e: command::error::AppError) {
+    match e {
+        command::error::AppError::Args(a) => {
+            eprintln!("{}", a);
+        }
+        command::error::AppError::Config(c) => {
+            eprintln!("{}", c);
+        }
+        command::error::AppError::Response(r) => {
+            eprintln!("{}", r);
+        }
+        command::error::AppError::Other(m) => {
+            eprintln!("{}", m);
+        }
     }
 }

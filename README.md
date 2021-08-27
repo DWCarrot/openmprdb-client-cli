@@ -30,14 +30,14 @@ SUBCOMMANDS:
     help          Prints this message or the help of the given subcommand(s)
     config        Config basic settings; use [option]=<value> to set value & [option]=? to check value
     cert          Management other server's public key registered in OpenMPRDB
-    keyring       List keys info in the specific secret key file of the server (bind to this client)
+    <!-- keyring       List keys info in the specific secret key file of the server (bind to this client) -->
     register      Register the server with the secret key to remote OpenMPRDB
     unregister    Unregister the server with the secret key from remote OpenMPRDB
     submit        Submit one record to remote OpenMPRDB
     recall        Recall the specific record from remote OpenMPRDB
     server        Get & show servers registered in remote OpenMPRDB
     record        Acquire and verify record of records in remote OpenMPRDB with other server's public key
-
+    import        submit mutiple records import from banlist (banned-players.json)
 
 #### subcommand: config
 
@@ -57,7 +57,7 @@ OPTIONS:
         --server-uuid <server_uuid>    set server uuid registered; will be update automatically after a success register
 
 
-#### subcommand: keyring
+<!-- #### subcommand: keyring
 
 List keys info in the specific secret key file of the server (bind to this client)
 
@@ -70,7 +70,7 @@ FLAGS:
 
 OPTIONS:
         --cert-file <cert_file>    set certification file of TPK and TSK data structures; default means use value in config
-        --key-id <key_id>          specific key in the certification file; default means use value in config
+        --key-id <key_id>          specific key in the certification file; default means use value in config -->
 
 
 #### subcommand: cert
@@ -81,7 +81,7 @@ USAGE:
     openmprdbc-cli cert <--add|--remove> --server-uuid <server_uuid> [OPTIONS] 
 
 FLAGS:
-        --add        to add other server's public key
+        --add        to add other server's public key, input from console
     -h, --help       Prints help information
         --remove     to remove other server's public key
     -V, --version    Prints version information
@@ -107,7 +107,6 @@ FLAGS:
 OPTIONS:
         --api-url <api_url>            openmprdb api url
         --cert-file <cert_file>        set certification file of TPK and TSK data structures
-        --fingerprint <fingerprint>    specific fingerprint the certification file
         --key-id <key_id>              specific key in the certification file
     -s, --server-name <server_name>    name of server to register
 
@@ -186,3 +185,21 @@ OPTIONS:
         --limit <limit>
         --server-uuid <server_uuid>
         --submit-uuid <submit_uuid>
+
+
+#### subcommand: import
+
+Submit mutiple records import from banlist (banned-players.json)
+
+USAGE:
+    openmprdbc-cli.exe import [OPTIONS] <banlist>
+
+FLAGS:
+    -h, --help       Prints help information
+    -V, --version    Prints version information
+
+OPTIONS:
+        --interval <interval>    requset interval in milliseconds
+
+ARGS:
+    <banlist>    banlist file (banned-players.json)

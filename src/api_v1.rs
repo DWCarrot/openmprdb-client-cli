@@ -13,7 +13,7 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::pgp;
-use crate::config::deserialize_fromstr;
+use crate::config::servers::deserialize_fromstr;
 
 
 /**
@@ -86,6 +86,9 @@ impl Display for ErrorResponse {
     }
 }
 
+impl std::error::Error for ErrorResponse {
+    
+}
 
 /**
  * 
@@ -110,12 +113,12 @@ impl WriteTo for RegisterContent {
 pub struct RegisterRequest<'a> {
     content: RegisterContent,
     cert: &'a Cert,
-    keypair: KeyPair,
+    keypair: &'a KeyPair,
 }
 
 impl<'a> RegisterRequest<'a> {
 
-    pub fn new(content: RegisterContent, cert: &'a Cert, keypair: KeyPair) -> Self {
+    pub fn new(content: RegisterContent, cert: &'a Cert, keypair: &'a KeyPair) -> Self {
         RegisterRequest {
             content,
             cert,
@@ -171,7 +174,7 @@ impl<'a> RequestInfo for RegisterRequest<'a> {
     }
 
     fn url<'b>(&self, base_url: &'b Url) -> Cow<'b, Url> {
-        Cow::Owned(base_url.join("server/register").unwrap())
+        Cow::Owned(base_url.join("v1/server/register").unwrap())
     }
 }
 
@@ -209,15 +212,15 @@ impl WriteTo for UnregisterContent {
 }
 
 
-pub struct UnregisterRequest {
+pub struct UnregisterRequest<'a> {
     content: UnregisterContent,
-    keypair: KeyPair,
+    keypair: &'a KeyPair,
     server_uuid: Uuid,
 }
 
-impl UnregisterRequest {
+impl<'a> UnregisterRequest<'a> {
 
-    pub fn new(content: UnregisterContent, keypair: KeyPair,server_uuid: Uuid) -> Self {
+    pub fn new(content: UnregisterContent, keypair: &'a KeyPair,server_uuid: Uuid) -> Self {
         UnregisterRequest {
             content,
             keypair,
@@ -226,7 +229,7 @@ impl UnregisterRequest {
     }
 }
 
-impl WriteTo for UnregisterRequest {
+impl<'a> WriteTo for UnregisterRequest<'a> {
     type Error = anyhow::Error;
 
     fn write_to<W: io::Write + Sync + Send>(&self, w: W) -> Result<(), Self::Error> {
@@ -237,7 +240,7 @@ impl WriteTo for UnregisterRequest {
     }
 }
 
-impl RequestInfo for UnregisterRequest {
+impl<'a> RequestInfo for UnregisterRequest<'a> {
 
     fn method(&self) -> RequestMethod {
         RequestMethod::DELETE
@@ -248,7 +251,7 @@ impl RequestInfo for UnregisterRequest {
     }
 
     fn url<'b>(&self, base_url: &'b Url) -> Cow<'b, Url> {
-        Cow::Owned(base_url.join(&format!("server/uuid/{}", self.server_uuid.to_hyphenated_ref())).unwrap())
+        Cow::Owned(base_url.join(&format!("v1/server/uuid/{}", self.server_uuid.to_hyphenated_ref())).unwrap())
     }
 }
 
@@ -331,14 +334,14 @@ impl ReadFrom for SubmitContent {
 }
 
 
-pub struct SubmitRequest {
+pub struct SubmitRequest<'a> {
     content: SubmitContent,
-    keypair: KeyPair
+    keypair: &'a KeyPair
 }
 
-impl SubmitRequest {
+impl<'a> SubmitRequest<'a> {
 
-    pub fn new(content: SubmitContent, keypair: KeyPair) -> Self {
+    pub fn new(content: SubmitContent, keypair: &'a KeyPair) -> Self {
         SubmitRequest {
             content,
             keypair
@@ -346,7 +349,7 @@ impl SubmitRequest {
     }
 }
 
-impl WriteTo for SubmitRequest {
+impl<'a> WriteTo for SubmitRequest<'a> {
     type Error = anyhow::Error;
 
     fn write_to<W: io::Write + Sync + Send>(&self, w: W) -> Result<(), Self::Error> {
@@ -357,7 +360,7 @@ impl WriteTo for SubmitRequest {
     }
 }
 
-impl RequestInfo for SubmitRequest {
+impl<'a> RequestInfo for SubmitRequest<'a> {
 
     fn method(&self) -> RequestMethod {
         RequestMethod::PUT
@@ -368,7 +371,7 @@ impl RequestInfo for SubmitRequest {
     }
 
     fn url<'b>(&self, base_url: &'b Url) -> Cow<'b, Url> {
-        Cow::Owned(base_url.join("submit/new").unwrap())
+        Cow::Owned(base_url.join("v1/submit/new").unwrap())
     }
 }
 
@@ -406,15 +409,15 @@ impl WriteTo for RecallContent {
 }
 
 
-pub struct RecallRequest {
+pub struct RecallRequest<'a> {
     submit_uuid: Uuid,
     content: RecallContent,
-    keypair: KeyPair
+    keypair: &'a KeyPair
 }
 
-impl RecallRequest {
+impl<'a> RecallRequest<'a> {
 
-    pub fn new(submit_uuid: Uuid, content: RecallContent, keypair: KeyPair) -> Self {
+    pub fn new(submit_uuid: Uuid, content: RecallContent, keypair: &'a KeyPair) -> Self {
         RecallRequest {
             submit_uuid,
             content,
@@ -423,7 +426,7 @@ impl RecallRequest {
     }
 }
 
-impl WriteTo for RecallRequest {
+impl<'a> WriteTo for RecallRequest<'a> {
     type Error = anyhow::Error;
 
     fn write_to<W: io::Write + Sync + Send>(&self, w: W) -> Result<(), Self::Error> {
@@ -434,7 +437,7 @@ impl WriteTo for RecallRequest {
     }
 }
 
-impl RequestInfo for RecallRequest {
+impl<'a> RequestInfo for RecallRequest<'a> {
 
     fn method(&self) -> RequestMethod {
         RequestMethod::DELETE
@@ -445,7 +448,7 @@ impl RequestInfo for RecallRequest {
     }
 
     fn url<'b>(&self, base_url: &'b Url) -> Cow<'b, Url> {
-        Cow::Owned(base_url.join(&format!("submit/uuid/{}", self.submit_uuid.to_hyphenated_ref())).unwrap())
+        Cow::Owned(base_url.join(&format!("v1/submit/uuid/{}", self.submit_uuid.to_hyphenated_ref())).unwrap())
     }
 }
 
@@ -497,7 +500,7 @@ impl RequestInfo for ServerListRequest {
     }
 
     fn url<'b>(&self, base_url: &'b Url) -> Cow<'b, Url> {
-        let mut url = base_url.join("server/list").unwrap();
+        let mut url = base_url.join("v1/server/list").unwrap();
         if let Some(limit) = self.limit {
             let mut pairs = url.query_pairs_mut();
             pairs.append_pair("limit", limit.to_string().as_str());
@@ -569,7 +572,7 @@ impl RequestInfo for GetSubmitRequest {
     }
 
     fn url<'b>(&self, base_url: &'b Url) -> Cow<'b, Url> {
-        Cow::Owned(base_url.join(&format!("submit/uuid/{}", self.submit_uuid.to_hyphenated_ref())).unwrap())
+        Cow::Owned(base_url.join(&format!("v1/submit/uuid/{}", self.submit_uuid.to_hyphenated_ref())).unwrap())
     }
 }
 
@@ -650,10 +653,10 @@ impl RequestInfo for GetServerSubmitRequest {
     fn url<'b>(&self, base_url: &'b Url) -> Cow<'b, Url> {
         let path = match &self.handle {
             ServerHandle::ServerUUID(server_uuid) => {
-                format!("submit/server/{}", server_uuid.to_hyphenated_ref())
+                format!("v1/submit/server/{}", server_uuid.to_hyphenated_ref())
             }
             ServerHandle::KeyID(key_id) => {
-                format!("submit/key/{}", key_id)
+                format!("v1/submit/key/{}", key_id)
             }
         };
         let mut url = base_url.join(&path).unwrap();
