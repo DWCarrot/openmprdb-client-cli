@@ -15,6 +15,9 @@ use std::borrow::Borrow as _;
 use anyhow::Result as GeneralResult;
 use uuid::Uuid;
 use sequoia_openpgp::KeyID;
+use sequoia_openpgp::Cert;
+use sequoia_openpgp::policy::Policy;
+use sequoia_openpgp::crypto::KeyPair;
 
 use crate::pgp;
 use crate::api_v1 as api;
@@ -28,17 +31,54 @@ fn timestamp(now: SystemTime) -> Result<u64, SystemTimeError> {
     now.duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs())
 }
 
+
+pub struct SigningKeyPairGenerator<'a> {
+    password: &'a dyn pgp::PasswordProvider,
+    policy: &'a dyn Policy,
+    cache: Option<(KeyID, KeyPair)>,
+}
+
+impl<'a> SigningKeyPairGenerator<'a> {
+
+    pub fn new(password: &'a dyn pgp::PasswordProvider, policy: &'a dyn Policy) -> Self {
+        SigningKeyPairGenerator {
+            password,
+            policy,
+            cache: None
+        }
+    }
+
+    pub fn generate(&mut self, cert: &Cert, key_id: &KeyID, timestamp: Option<SystemTime>) -> GeneralResult<&KeyPair> {
+        
+        if let Some((cached_key_id, cached_keypair)) = &self.cache {
+            if cached_key_id == key_id {
+                
+            } else {
+                let keypair = pgp::get_signing_key(cert, self.policy, timestamp, key_id, self.password)?;
+                self.cache = Some((key_id.clone(), keypair));
+            }
+        } else {
+            let keypair = pgp::get_signing_key(cert, self.policy, timestamp, key_id, self.password)?;
+            self.cache = Some((key_id.clone(), keypair));
+        }
+        
+        Ok(&self.cache.as_ref().unwrap().1)
+    }
+}
+
+
+
 pub fn command_register<'a>(
     cfg: &mut ClientConfig, 
     httpc: &http::Client,
-    password: &dyn pgp::PasswordProvider,
+    kpg: &mut SigningKeyPairGenerator,
     server_name: &'a str,
 ) -> error::AppResult<'a> {
     let cfg_data = cfg.get_data();
     
     let cert = error::ConfigMissing::ok(cfg_data.get_cert(), "client.cert_file")?;
     let key_id = error::ConfigMissing::ok(cfg_data.key_id.as_ref(), "client.key_id")?;
-    let keypair = pgp::get_signing_key(cert, cfg.policy(), None, key_id, password)?;
+    let keypair = kpg.generate(cert, key_id, None)?;
     let api_url = error::ConfigMissing::ok(cfg_data.api_url.as_ref(), "client.api_url")?;
 
     let req = api::RegisterRequest::new(
@@ -60,7 +100,7 @@ pub fn command_register<'a>(
 pub fn command_unregister<'a>(
     cfg: &mut ClientConfig,
     httpc: &http::Client,
-    password: &dyn pgp::PasswordProvider, 
+    kpg: &mut SigningKeyPairGenerator,
     comment: &'a str,
 ) -> error::AppResult<'a> {
     
@@ -70,7 +110,7 @@ pub fn command_unregister<'a>(
     let server_uuid = error::ConfigMissing::ok(cfg_data.server_uuid.as_ref(), "client.server_uuid")?.clone();
     let cert = error::ConfigMissing::ok(cfg_data.get_cert(), "client.cert_file")?;
     let key_id = error::ConfigMissing::ok(cfg_data.key_id.as_ref(), "client.key_id")?;
-    let keypair = pgp::get_signing_key(cert, cfg.policy(), None, key_id, password)?;
+    let keypair = kpg.generate(cert, key_id, None)?;
     let api_url = error::ConfigMissing::ok(cfg_data.api_url.as_ref(), "client.api_url")?;
 
     let req = api::UnregisterRequest::new(
@@ -96,7 +136,7 @@ pub fn command_submit<'a>(
     cfg: &mut ClientConfig,
     records: &mut RecordConfig,
     httpc: &http::Client,
-    password: &dyn pgp::PasswordProvider,
+    kpg: &mut SigningKeyPairGenerator,
     player_uuid: &'a str, 
     points: &'a str, 
     comment: &'a str,
@@ -117,7 +157,7 @@ pub fn command_submit<'a>(
     let server_uuid = error::ConfigMissing::ok(cfg_data.server_uuid.as_ref(), "client.server_uuid")?.clone();
     let cert = error::ConfigMissing::ok(cfg_data.get_cert(), "client.cert_file")?;
     let key_id = error::ConfigMissing::ok(cfg_data.key_id.as_ref(), "client.key_id")?;
-    let keypair = pgp::get_signing_key(cert, cfg.policy(), None, key_id, password)?;
+    let keypair = kpg.generate(cert, key_id, None)?;
     let api_url = error::ConfigMissing::ok(cfg_data.api_url.as_ref(), "client.api_url")?;
 
     let timestamp = timestamp(SystemTime::now()).unwrap();
@@ -145,7 +185,7 @@ pub fn command_recall<'a>(
     cfg: &mut ClientConfig,
     records: &mut RecordConfig,
     httpc: &http::Client,
-    password: &dyn pgp::PasswordProvider,
+    kpg: &mut SigningKeyPairGenerator,
     record_uuid: &'a str, 
     comment: &'a str,
     force: bool,
@@ -166,7 +206,7 @@ pub fn command_recall<'a>(
     let server_uuid = error::ConfigMissing::ok(cfg_data.server_uuid.as_ref(), "client.server_uuid")?.clone();
     let cert = error::ConfigMissing::ok(cfg_data.get_cert(), "client.cert_file")?;
     let key_id = error::ConfigMissing::ok(cfg_data.key_id.as_ref(), "client.key_id")?;
-    let keypair = pgp::get_signing_key(cert, cfg.policy(), None, key_id, password)?;
+    let keypair = kpg.generate(cert, key_id, None)?;
     let api_url = error::ConfigMissing::ok(cfg_data.api_url.as_ref(), "client.api_url")?;
 
     let timestamp = timestamp(SystemTime::now()).unwrap();    
@@ -444,7 +484,7 @@ pub fn command_import<'a>(
     cfg: &mut ClientConfig,
     records: &mut RecordConfig,
     httpc: &http::Client,
-    password: &dyn pgp::PasswordProvider,
+    kpg: &mut SigningKeyPairGenerator,
     banlist: &'a str,
     interval: Option<&'a str>,
     rules: &dyn banlist::GeneratePoints
@@ -461,7 +501,7 @@ pub fn command_import<'a>(
     let server_uuid = error::ConfigMissing::ok(cfg_data.server_uuid.as_ref(), "client.server_uuid")?.clone();
     let cert = error::ConfigMissing::ok(cfg_data.get_cert(), "client.cert_file")?;
     let key_id = error::ConfigMissing::ok(cfg_data.key_id.as_ref(), "client.key_id")?;
-    let keypair = pgp::get_signing_key(cert, cfg.policy(), None, key_id, password)?;
+    let keypair = kpg.generate(cert, key_id, None)?;
     let api_url = error::ConfigMissing::ok(cfg_data.api_url.as_ref(), "client.api_url")?;
 
     let mut last = SystemTime::UNIX_EPOCH;

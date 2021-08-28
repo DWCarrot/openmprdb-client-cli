@@ -287,8 +287,6 @@ fn main() {
 
 
     let matches = app.get_matches();
-    
-    let password = pgp::TTYPasswordProvider;
 
     match matches.subcommand() {
         ("config", Some(sub_matches)) => {
@@ -356,6 +354,7 @@ fn main() {
             )
             .unwrap();
             let httpc = command::http::Client::new().unwrap();
+            let mut kpg = command::SigningKeyPairGenerator::new(&pgp::TTYPasswordProvider, policy.as_ref());
 
             if let Some(s) = sub_matches.value_of("cert_file") {
                 cfg.set_cert_file(s);
@@ -373,7 +372,7 @@ fn main() {
             command::command_register(
                 &mut cfg, 
                 &httpc,
-                &password,
+                &mut kpg,
                 sub_matches.value_of("server_name").unwrap(),
             )
             .unwrap_or_else(handle_err);
@@ -387,11 +386,12 @@ fn main() {
             )
             .unwrap();
             let httpc = command::http::Client::new().unwrap();
+            let mut kpg = command::SigningKeyPairGenerator::new(&pgp::TTYPasswordProvider, policy.as_ref());
 
             command::command_unregister(
                 &mut cfg,
                 &httpc,
-                &password,
+                &mut kpg,
                 sub_matches.value_of("comment").unwrap_or_default()
             )
             .unwrap_or_else(handle_err);
@@ -409,13 +409,13 @@ fn main() {
             )
             .unwrap();
             let httpc = command::http::Client::new().unwrap();
-
+            let mut kpg = command::SigningKeyPairGenerator::new(&pgp::TTYPasswordProvider, policy.as_ref());
 
             command::command_submit(
                 &mut cfg,
                 &mut records,
                 &httpc,
-                &password,
+                &mut kpg,
                 sub_matches.value_of("player_uuid").unwrap(),
                 sub_matches.value_of("points").unwrap(),
                 sub_matches.value_of("comment").unwrap_or_default(),
@@ -436,12 +436,13 @@ fn main() {
             )
             .unwrap();
             let httpc = command::http::Client::new().unwrap();
+            let mut kpg = command::SigningKeyPairGenerator::new(&pgp::TTYPasswordProvider, policy.as_ref());
 
             command::command_recall(
                 &mut cfg,
                 &mut records,
                 &httpc,
-                &password,
+                &mut kpg,
                 sub_matches.value_of("record_uuid").unwrap(),
                 sub_matches.value_of("comment").unwrap_or_default(),
                 sub_matches.is_present("force")
@@ -573,6 +574,7 @@ fn main() {
             )
             .unwrap();
             let httpc = command::http::Client::new().unwrap();
+            let mut kpg = command::SigningKeyPairGenerator::new(&pgp::TTYPasswordProvider, policy.as_ref());
 
             let rules = command::banlist::BasicGeneratePoints;
 
@@ -580,7 +582,7 @@ fn main() {
                 &mut cfg, 
                 &mut records, 
                 &httpc, 
-                &password, 
+                &mut kpg, 
                 sub_matches.value_of("banlist").unwrap(),
                 sub_matches.value_of("interval"),
                 &rules
@@ -600,7 +602,7 @@ impl<'a> fmt::Display for OptionalKeyIDDisplay<'a> {
 
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if let Some(key_id) = self.0 {
-            f.write_str(key_id.to_hex().as_str())?;
+            f.write_fmt(format_args!("{:X}", key_id))?;
         }
         Ok(())
     }
@@ -613,7 +615,7 @@ impl<'a> fmt::Display for OptionalFingerprintDisplay<'a> {
 
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if let Some(fingerprint) = self.0 {
-            f.write_str(fingerprint.to_hex().as_str())?;
+            f.write_fmt(format_args!("{:X}", fingerprint))?;
         }
         Ok(())
     }
