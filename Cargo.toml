@@ -19,7 +19,7 @@ chrono = "^0.4"
 uuid = { version = "^0.8", features = ["serde"] }
 url = "^2.2"
 
-[features]
+ [features]
 cng = ["sequoia-openpgp/crypto-cng"]
 nettle = ["sequoia-openpgp/crypto-nettle"]
-default = ["cng"]
+default = []
